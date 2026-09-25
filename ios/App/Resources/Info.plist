@@ -32,6 +32,14 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<!-- iPad compatibility / multitasking requires all orientations unless full-screen-only. -->
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Context Cleaner analyzes your photos entirely on-device to find utility junk, social misses, and better shots in a burst. Photos never leave your iPhone.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

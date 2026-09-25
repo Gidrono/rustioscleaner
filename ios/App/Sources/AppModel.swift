@@ -17,6 +17,12 @@ final class AppModel: ObservableObject {
     @Published var reviewRemaining: UInt32 = 0
     @Published var currentCard: ReviewCard?
     @Published var stagedTossCount = 0
+    /// Photos deleted during the current review visit (after successful commits).
+    @Published var sessionDeletedCount = 0
+    /// Approximate bytes freed during the current review visit.
+    @Published var sessionFreedBytes: Int64 = 0
+    /// Latest successful delete batch; drives the cleaned-summary sheet.
+    @Published var lastCleanResult: CleanResult?
     @Published var isScanning = false
     @Published var scanProgress: String = ""
     @Published var thermalLabel = "nominal"
@@ -73,6 +79,15 @@ final class AppModel: ObservableObject {
         let miss: Float
         let aesthetic: Float
         let clusterSize: UInt32
+    }
+
+    /// Result of one successful delete commit (for the summary sheet).
+    struct CleanResult: Identifiable {
+        let id = UUID()
+        let deletedCount: Int
+        let freedBytes: Int64
+        let sessionDeletedCount: Int
+        let sessionFreedBytes: Int64
     }
 
     /// Pixel size for the review card image on the current screen.
@@ -366,19 +381,30 @@ final class AppModel: ObservableObject {
         )
         photos.startCaching(identifiers: [item.assetId], size: displaySize)
         let assetId = item.assetId
+        // Clear so the card shows a spinner instead of the previous photo while loading.
+        cardImage = nil
         Task {
             guard let asset = photos.asset(for: assetId) else { return }
-            let image = await photos.requestDisplayImage(for: asset, targetSize: displaySize)
-            if currentCard?.assetId == assetId {
-                cardImage = image
+            // Drive the UI only through onUpdate so a later await-return can't overwrite
+            // a sharper frame that already arrived.
+            _ = await photos.requestDisplayImage(for: asset, targetSize: displaySize) { preview in
+                Task { @MainActor in
+                    if self.currentCard?.assetId == assetId {
+                        self.cardImage = preview
+                    }
+                }
             }
         }
     }
 
     /// Load a high-quality image for a related (better / near-duplicate) asset.
-    func loadRelatedImage(assetId: String) async -> UIImage? {
+    func loadRelatedImage(assetId: String, onUpdate: ((UIImage) -> Void)? = nil) async -> UIImage? {
         guard let asset = photos.asset(for: assetId) else { return nil }
-        return await photos.requestDisplayImage(for: asset, targetSize: Self.reviewDisplaySize)
+        return await photos.requestDisplayImage(
+            for: asset,
+            targetSize: Self.reviewDisplaySize,
+            onUpdate: onUpdate
+        )
     }
 
     private static let clusterReasonKinds: Set<String> = [
@@ -435,14 +461,37 @@ final class AppModel: ObservableObject {
         refreshCard()
     }
 
+    /// Reset per-visit cleaned totals when entering review.
+    func resetSessionCleanStats() {
+        sessionDeletedCount = 0
+        sessionFreedBytes = 0
+        lastCleanResult = nil
+    }
+
+    func dismissCleanResult() {
+        lastCleanResult = nil
+    }
+
     func commitDeletes() async {
-        let ids = engine?.takeTossed() ?? []
+        // Peek first so a failed/cancelled PhotoKit prompt keeps staging intact.
+        let ids = engine?.stagedTossIds() ?? []
         guard !ids.isEmpty else { return }
+        let bytes = photos.totalByteSize(identifiers: ids)
         do {
             try await photos.deleteAssets(identifiers: ids)
+            _ = engine?.takeTossed()
             stagedTossCount = 0
+            sessionDeletedCount += ids.count
+            sessionFreedBytes += bytes
+            lastCleanResult = CleanResult(
+                deletedCount: ids.count,
+                freedBytes: bytes,
+                sessionDeletedCount: sessionDeletedCount,
+                sessionFreedBytes: sessionFreedBytes
+            )
         } catch {
             lastError = error.localizedDescription
+            stagedTossCount = engine?.stagedTossIds().count ?? stagedTossCount
         }
     }
 

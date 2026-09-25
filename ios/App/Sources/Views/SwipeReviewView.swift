@@ -7,6 +7,8 @@ struct SwipeReviewView: View {
     @State private var offset: CGSize = .zero
     @State private var showCommit = false
     @State private var relatedPresentation: RelatedPhotoPresentation?
+    /// Avoid resetting session stats when PhotoKit’s system confirm re-triggers onAppear.
+    @State private var didStartSession = false
 
     var body: some View {
         NavigationStack {
@@ -37,9 +39,30 @@ struct SwipeReviewView: View {
                         }
                     }
                     .padding(.top, 8)
+                } else if model.stagedTossCount > 0 {
+                    ContentUnavailableView(
+                        "Ready to delete",
+                        systemImage: "trash.circle",
+                        description: Text("\(model.stagedTossCount) photo\(model.stagedTossCount == 1 ? "" : "s") staged. Confirm below to move them to Recently Deleted.")
+                    )
+                } else if model.sessionDeletedCount > 0 {
+                    ContentUnavailableView(
+                        "You're all caught up",
+                        systemImage: "checkmark.seal",
+                        description: Text(sessionEmptyDescription)
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "You're all caught up",
+                        systemImage: "checkmark.seal",
+                        description: Text("Run a scan to find more candidates, or enjoy the free space.")
+                    )
+                }
 
+                if model.currentCard != nil || model.stagedTossCount > 0 {
                     HStack {
                         Button("Undo") { model.decide(.undo) }
+                            .disabled(model.currentCard == nil && model.stagedTossCount == 0)
                         Spacer()
                         Text("\(model.reviewRemaining) left")
                             .foregroundStyle(.secondary)
@@ -50,16 +73,15 @@ struct SwipeReviewView: View {
                         .disabled(model.stagedTossCount == 0)
                     }
                     .padding(.horizontal)
-                } else {
-                    ContentUnavailableView(
-                        "You're all caught up",
-                        systemImage: "checkmark.seal",
-                        description: Text("Run a scan to find more candidates, or enjoy the free space.")
-                    )
                 }
             }
             .padding()
             .navigationTitle("Keep or Toss")
+            .onAppear {
+                guard !didStartSession else { return }
+                didStartSession = true
+                model.resetSessionCleanStats()
+            }
             .confirmationDialog(
                 "Move \(model.stagedTossCount) photos to Recently Deleted?",
                 isPresented: $showCommit,
@@ -72,11 +94,32 @@ struct SwipeReviewView: View {
             } message: {
                 Text("Apple will ask you to confirm. Photos stay recoverable for 30 days.")
             }
+            .sheet(item: Binding(
+                get: { model.lastCleanResult },
+                set: { if $0 == nil { model.dismissCleanResult() } }
+            )) { result in
+                CleanedSummarySheet(result: result) {
+                    model.dismissCleanResult()
+                }
+            }
             .sheet(item: $relatedPresentation) { presentation in
                 RelatedPhotoSheet(presentation: presentation)
                     .environmentObject(model)
             }
         }
+    }
+
+    private var sessionEmptyDescription: String {
+        let photos = "\(model.sessionDeletedCount) photo\(model.sessionDeletedCount == 1 ? "" : "s")"
+        let space = Self.formatBytes(model.sessionFreedBytes)
+        return "This visit you cleaned \(photos) · \(space). Run a scan for more candidates."
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 
     private func cardView(_ card: AppModel.ReviewCard) -> some View {
@@ -218,6 +261,70 @@ struct SwipeReviewView: View {
     }
 }
 
+/// Post-delete celebration with count, space freed, and Done.
+private struct CleanedSummarySheet: View {
+    let result: AppModel.CleanResult
+    let onDone: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Spacer()
+                Image(systemName: "sparkles")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.tint)
+                Text("Nice clean")
+                    .font(Font.title.bold())
+                Text(batchLine)
+                    .font(.title3)
+                    .multilineTextAlignment(.center)
+                if showsSessionExtra {
+                    Text(sessionLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                Text("Photos stay in Recently Deleted for 30 days.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
+                Button(action: onDone) {
+                    Text("Done")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(24)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.medium])
+    }
+
+    private var batchLine: String {
+        let photos = "\(result.deletedCount) photo\(result.deletedCount == 1 ? "" : "s")"
+        return "\(photos) · \(Self.formatBytes(result.freedBytes))"
+    }
+
+    private var showsSessionExtra: Bool {
+        result.sessionDeletedCount > result.deletedCount
+    }
+
+    private var sessionLine: String {
+        let photos = "\(result.sessionDeletedCount) photo\(result.sessionDeletedCount == 1 ? "" : "s")"
+        return "This session: \(photos) · \(Self.formatBytes(result.sessionFreedBytes))"
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
 private struct RelatedPhotoPresentation: Identifiable {
     var id: String { assetId }
     let assetId: String
@@ -252,7 +359,11 @@ private struct RelatedPhotoSheet: View {
                 }
             }
             .task(id: presentation.assetId) {
-                image = await model.loadRelatedImage(assetId: presentation.assetId)
+                _ = await model.loadRelatedImage(assetId: presentation.assetId) { preview in
+                    Task { @MainActor in
+                        image = preview
+                    }
+                }
             }
         }
     }

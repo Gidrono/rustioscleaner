@@ -11,6 +11,12 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CORE/target}"
 mkdir -p "$OUT" "$GEN"
 cd "$CORE"
 
+# Match the app’s deployment target so bundled C (sqlite) isn’t stamped with the SDK’s
+# default (e.g. iOS 26.5), which breaks linking against IPHONEOS_DEPLOYMENT_TARGET 18.0.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-18.0}"
+export CFLAGS_aarch64_apple_ios="${CFLAGS_aarch64_apple_ios:--mios-version-min=${IPHONEOS_DEPLOYMENT_TARGET}}"
+export CFLAGS_aarch64_apple_ios_sim="${CFLAGS_aarch64_apple_ios_sim:--mios-simulator-version-min=${IPHONEOS_DEPLOYMENT_TARGET}}"
+
 echo "==> Building cleaner-ffi (host + iOS device + simulator)"
 cargo build -p cleaner-ffi --release
 cargo build -p cleaner-ffi --release --target aarch64-apple-ios

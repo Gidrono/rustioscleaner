@@ -127,49 +127,54 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         for asset: PHAsset,
         maxPixel: CGFloat = 384
     ) async -> UIImage? {
-        await withCheckedContinuation { cont in
-            let opts = PHImageRequestOptions()
-            opts.deliveryMode = .fastFormat
-            opts.resizeMode = .fast
-            opts.isNetworkAccessAllowed = true
-            opts.isSynchronous = false
-            let target = CGSize(width: maxPixel, height: maxPixel)
-            var resumed = false
-            imageManager.requestImage(
-                for: asset,
-                targetSize: target,
-                contentMode: .aspectFill,
-                options: opts
-            ) { image, info in
-                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
-                let error = info?[PHImageErrorKey] as? Error
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !resumed else { return }
-                if cancelled || error != nil {
-                    resumed = true
-                    cont.resume(returning: nil)
-                    return
-                }
-                if !degraded {
-                    resumed = true
-                    cont.resume(returning: image)
-                }
-            }
-        }
+        await requestImage(
+            for: asset,
+            targetSize: CGSize(width: maxPixel, height: maxPixel),
+            deliveryMode: .fastFormat,
+            resizeMode: .fast
+        )
     }
 
     /// High-quality image for on-screen review (not analysis thumbnails).
+    ///
+    /// Uses opportunistic delivery so a cached/degraded frame can appear immediately,
+    /// then upgrades when the final image arrives. Waiting only for `!degraded` with a
+    /// single continuation can hang forever (spinner never clears).
     public func requestDisplayImage(
         for asset: PHAsset,
-        targetSize: CGSize
+        targetSize: CGSize,
+        onUpdate: ((UIImage) -> Void)? = nil
+    ) async -> UIImage? {
+        // Non-nil onUpdate enables “finish on first frame” so we never hang if PhotoKit
+        // never delivers a non-degraded callback; still forwards upgrades when provided.
+        let progress = onUpdate ?? { _ in }
+        return await requestImage(
+            for: asset,
+            targetSize: targetSize,
+            deliveryMode: .opportunistic,
+            resizeMode: .fast,
+            onUpdate: progress
+        )
+    }
+
+    /// PhotoKit may call the handler multiple times (degraded → final). We always surface
+    /// the first usable image, upgrade via `onUpdate`, and finish on final / error / cancel.
+    private func requestImage(
+        for asset: PHAsset,
+        targetSize: CGSize,
+        deliveryMode: PHImageRequestOptionsDeliveryMode,
+        resizeMode: PHImageRequestOptionsResizeMode,
+        onUpdate: ((UIImage) -> Void)? = nil
     ) async -> UIImage? {
         await withCheckedContinuation { cont in
             let opts = PHImageRequestOptions()
-            opts.deliveryMode = .highQualityFormat
-            opts.resizeMode = .exact
+            opts.deliveryMode = deliveryMode
+            opts.resizeMode = resizeMode
             opts.isNetworkAccessAllowed = true
             opts.isSynchronous = false
+            let lock = NSLock()
             var resumed = false
+            var latest: UIImage?
             imageManager.requestImage(
                 for: asset,
                 targetSize: targetSize,
@@ -179,16 +184,27 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
                 let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
                 let error = info?[PHImageErrorKey] as? Error
                 let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                guard !resumed else { return }
-                if cancelled || error != nil {
-                    resumed = true
-                    cont.resume(returning: nil)
-                    return
+
+                if let image {
+                    lock.lock()
+                    latest = image
+                    lock.unlock()
+                    onUpdate?(image)
                 }
-                if !degraded {
-                    resumed = true
-                    cont.resume(returning: image)
-                }
+
+                // Complete on final / cancel / error. If a progressive `onUpdate` consumer
+                // already has a frame, also finish on first image so we never hang when
+                // PhotoKit never delivers `!degraded` (common with iCloud / caching).
+                let shouldFinish =
+                    cancelled || error != nil || !degraded
+                    || (onUpdate != nil && image != nil)
+                lock.lock()
+                let already = resumed
+                let result = latest
+                if shouldFinish && !already { resumed = true }
+                lock.unlock()
+                guard shouldFinish, !already else { return }
+                cont.resume(returning: result)
             }
         }
     }
