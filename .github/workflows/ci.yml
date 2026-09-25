@@ -45,7 +45,8 @@ jobs:
 
   ios:
     name: iOS build
-    runs-on: macos-14
+    # XcodeGen emits project format 77; needs Xcode 16+ (default on macos-15).
+    runs-on: macos-15
     needs: xcframework
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +65,7 @@ jobs:
           xcodebuild \
             -project ContextCleaner.xcodeproj \
             -scheme ContextCleaner \
-            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
             build

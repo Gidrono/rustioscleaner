@@ -121,13 +121,16 @@ struct SwipeReviewView: View {
     }
 
     private func stamp(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.title.bold())
+        stampLabel(text)
             .foregroundStyle(color)
             .padding(8)
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(color, lineWidth: 3))
             .padding(24)
-            .opacity(min(1, abs(offset.width + offset.height) / 120))
+            .opacity(min(1.0, abs(offset.width + offset.height) / 120.0))
+    }
+
+    private func stampLabel(_ text: String) -> Text {
+        Text(text).font(.title.bold())
     }
 
     private func reasonChips(_ reasons: [AppModel.ReasonChip]) -> some View {
