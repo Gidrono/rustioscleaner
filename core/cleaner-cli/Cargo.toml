@@ -1,0 +1,20 @@
+[package]
+name = "cleaner-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop harness for fusion/clustering evaluation"
+
+[[bin]]
+name = "cleaner-cli"
+path = "src/main.rs"
+
+[dependencies]
+cleaner-core = { path = "../cleaner-core" }
+cleaner-store = { path = "../cleaner-store" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber = "0.3"

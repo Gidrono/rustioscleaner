@@ -1,0 +1,4 @@
+module cleaner_ffiFFI {
+    header "cleaner_ffiFFI.h"
+    export *
+}

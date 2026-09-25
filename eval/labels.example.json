@@ -1,0 +1,22 @@
+[
+  {
+    "file": "example_parking.jpg",
+    "labels": ["utility_junk"]
+  },
+  {
+    "file": "example_blink.jpg",
+    "labels": ["social_miss"]
+  },
+  {
+    "file": "example_dog_a.jpg",
+    "labels": ["near_duplicate"],
+    "cluster": "dog1",
+    "is_best": false
+  },
+  {
+    "file": "example_dog_b.jpg",
+    "labels": ["keep"],
+    "cluster": "dog1",
+    "is_best": true
+  }
+]

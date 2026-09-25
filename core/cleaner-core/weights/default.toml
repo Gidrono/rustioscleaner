@@ -1,0 +1,29 @@
+# Fusion weights v1 — tune without recompiling core logic.
+version = 1
+
+blur_junk = 0.55
+dark_junk = 0.45
+bright_junk = 0.35
+pocket_junk = 0.95
+screenshot_junk = 0.40
+text_document_junk = 0.70
+barcode_junk = 0.75
+zero_shot_junk = 0.65
+vlm_ephemeral_junk = 0.90
+
+blink_miss = 0.85
+looking_away_miss = 0.70
+mouth_open_miss = 0.40
+
+aesthetic_from_model = 0.55
+aesthetic_from_sharpness = 0.20
+aesthetic_from_composition = 0.15
+aesthetic_from_face_quality = 0.10
+
+blur_soft = 80.0
+blur_hard = 25.0
+dark_threshold = 0.55
+bright_threshold = 0.45
+junk_queue_threshold = 0.55
+miss_queue_threshold = 0.60
+experimental_mouth = false

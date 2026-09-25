@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust tests
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+          components: clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+      - name: cli smoke
+        run: cargo run -p cleaner-cli -- weights | head -5
+
+  xcframework:
+    name: Build XCFramework
+    runs-on: macos-14
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Build
+        run: ./scripts/build-xcframework.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CleanerCore.xcframework
+          path: ios/Frameworks/CleanerCore.xcframework
+
+  ios:
+    name: iOS build
+    runs-on: macos-14
+    needs: xcframework
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: CleanerCore.xcframework
+          path: ios/Frameworks/CleanerCore.xcframework
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        working-directory: ios
+        run: xcodegen generate
+      - name: Build for simulator
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -project ContextCleaner.xcodeproj \
+            -scheme ContextCleaner \
+            -destination 'platform=iOS Simulator,name=iPhone 17' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "cleaner-core",
+    "cleaner-store",
+    "cleaner-ffi",
+    "cleaner-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Gidi Hanoch"]
+repository = "https://github.com/gidi/rustioscleaner"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+uniffi = { version = "0.28.3", features = ["cli"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
