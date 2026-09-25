@@ -178,8 +178,54 @@ pub fn fuse_scores(
         aesthetic: aesthetic.clamp(0.0, 1.0),
     };
 
-    let should_queue =
-        scores.junk >= weights.junk_queue_threshold || scores.miss >= weights.miss_queue_threshold;
+    // Optimize Storage: full-res is in iCloud Photos (not a separate backup).
+    // Informational only — deleting still removes the iCloud original.
+    if !meta.is_locally_available {
+        reasons.push(Reason::new(
+            ReasonKind::CloudOriginal,
+            "Full-res in iCloud Photos (Optimize Storage)",
+            0.55,
+        ));
+    }
+
+    // User-declared secondary backup (Google Photos / other). Softens queue threshold.
+    let backup_slack = 0.08f32;
+    if let Some(label) = meta.secondary_backup_label.as_deref() {
+        let label = label.trim();
+        if !label.is_empty() {
+            let has_substantive_reason = reasons
+                .iter()
+                .any(|r| r.kind != ReasonKind::CloudOriginal);
+            let nearly_queued = scores.junk >= weights.junk_queue_threshold - backup_slack
+                || scores.miss >= weights.miss_queue_threshold - backup_slack
+                || has_substantive_reason;
+            if nearly_queued {
+                reasons.push(Reason::new(
+                    ReasonKind::SecondaryBackup,
+                    format!("You said you also back up to {label}"),
+                    0.5,
+                ));
+            }
+        }
+    }
+
+    let has_secondary = meta
+        .secondary_backup_label
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let junk_thresh = if has_secondary {
+        (weights.junk_queue_threshold - backup_slack).max(0.35)
+    } else {
+        weights.junk_queue_threshold
+    };
+    let miss_thresh = if has_secondary {
+        (weights.miss_queue_threshold - backup_slack).max(0.40)
+    } else {
+        weights.miss_queue_threshold
+    };
+
+    let should_queue = scores.junk >= junk_thresh || scores.miss >= miss_thresh;
 
     FusionResult {
         scores,
@@ -260,7 +306,53 @@ mod tests {
             longitude: None,
             pixel_width: 100,
             pixel_height: 100,
+            byte_size: 0,
+            is_locally_available: true,
+            secondary_backup_label: None,
         }
+    }
+
+    #[test]
+    fn cloud_original_is_informational() {
+        let mut m = meta();
+        m.is_locally_available = false;
+        let r = fuse_scores(&m, &AssetFeatures::default(), &FusionWeights::default());
+        assert!(!r.should_queue);
+        assert!(r.reasons.iter().any(|x| x.kind == ReasonKind::CloudOriginal));
+    }
+
+    #[test]
+    fn secondary_backup_softens_threshold() {
+        use crate::types::FaceFeatures;
+        let mut m = meta();
+        m.secondary_backup_label = Some("Google Photos".into());
+        // miss just below default miss_queue_threshold (0.60) but above 0.60 - 0.08
+        let features = AssetFeatures {
+            face: Some(FaceFeatures {
+                face_count: 1,
+                any_looking_away: true,
+                looking_away_count: 1,
+                avg_capture_quality: 0.5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // looking_away_miss default 0.70 → should_queue with or without backup;
+        // use a custom soft miss below default threshold.
+        let mut weights = FusionWeights::default();
+        weights.looking_away_miss = 0.55; // below default miss_queue_threshold 0.60
+        let without = {
+            let mut plain = meta();
+            plain.secondary_backup_label = None;
+            fuse_scores(&plain, &features, &weights)
+        };
+        let with = fuse_scores(&m, &features, &weights);
+        assert!(!without.should_queue);
+        assert!(with.should_queue);
+        assert!(with
+            .reasons
+            .iter()
+            .any(|x| x.kind == ReasonKind::SecondaryBackup));
     }
 
     #[test]

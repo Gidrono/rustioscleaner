@@ -38,6 +38,8 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     header
+                    categoryPicker
+                    startScanButton
                     stats
                     if model.reviewRemaining > 0 {
                         NavigationLink {
@@ -68,9 +70,36 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Cull by intent, not pixels")
                 .font(.title2.bold())
-            Text("On-device AI finds utility junk, social misses, and the best shot in a burst. Nothing leaves your iPhone.")
+            Text("Choose what to look for, then start a scan. Nothing leaves your iPhone.")
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var categoryPicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Find")
+                .font(.headline)
+            ForEach(ScanCategory.allCases) { category in
+                CategoryToggleRow(
+                    category: category,
+                    isOn: model.scanCategories.isEnabled(category)
+                ) {
+                    model.toggleCategory(category)
+                }
+            }
+        }
+    }
+
+    private var startScanButton: some View {
+        Button {
+            Task { await model.startScan() }
+        } label: {
+            Label("Start scan", systemImage: "bolt.horizontal.circle")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(model.isScanning || !model.scanCategories.hasAnyEnabled)
+        .accessibilityLabel("Start on-device scan for selected categories")
     }
 
     private var stats: some View {
@@ -93,6 +122,40 @@ struct HomeView: View {
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+struct CategoryToggleRow: View {
+    let category: ScanCategory
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    .font(.title2)
+                    .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(category.title, systemImage: category.systemImage)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Text(category.subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(category.title)
+        .accessibilityValue(isOn ? "Selected" : "Not selected")
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 }
 

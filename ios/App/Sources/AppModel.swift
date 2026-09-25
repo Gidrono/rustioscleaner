@@ -27,24 +27,104 @@ final class AppModel: ObservableObject {
     @Published var showOnboarding = false
     @Published var cardImage: UIImage?
 
+    /// User-declared secondary backups (not API-verified). Softens queue thresholds.
+    @Published var backsUpGooglePhotos: Bool {
+        didSet { UserDefaults.standard.set(backsUpGooglePhotos, forKey: Self.googlePhotosKey) }
+    }
+    @Published var backsUpOther: Bool {
+        didSet { UserDefaults.standard.set(backsUpOther, forKey: Self.otherBackupKey) }
+    }
+
+    /// What to look for / show in review. User picks these before starting a scan.
+    @Published var scanCategories: ScanCategorySet {
+        didSet {
+            scanCategories.save()
+            guard engine != nil else { return }
+            applyCategoryFilterToEngine()
+            rebuildQueue()
+        }
+    }
+
+    private static let googlePhotosKey = "backup.googlePhotos"
+    private static let otherBackupKey = "backup.other"
+    private static let hasScannedKey = "scan.hasUserStarted"
+
     private var engine: CleanerEngine?
     private let photos = PhotoLibraryService.shared
+    private var hasUserStartedScan: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.hasScannedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.hasScannedKey) }
+    }
+
+    struct ReasonChip: Identifiable, Hashable {
+        var id: String { "\(kind)|\(detail)" }
+        let kind: String
+        let detail: String
+        /// Short label shown in the chip (no raw asset UUIDs).
+        let title: String
+        let relatedAssetId: String?
+    }
 
     struct ReviewCard: Identifiable {
         var id: String { assetId }
         let assetId: String
-        let reasons: [String]
+        let reasons: [ReasonChip]
         let junk: Float
         let miss: Float
         let aesthetic: Float
         let clusterSize: UInt32
     }
 
+    /// Pixel size for the review card image on the current screen.
+    static var reviewDisplaySize: CGSize {
+        let scale = UIScreen.main.scale
+        let width = UIScreen.main.bounds.width * scale
+        let height = 420 * scale
+        return CGSize(width: width, height: height)
+    }
+
+    init() {
+        backsUpGooglePhotos = UserDefaults.standard.bool(forKey: Self.googlePhotosKey)
+        backsUpOther = UserDefaults.standard.bool(forKey: Self.otherBackupKey)
+        scanCategories = ScanCategorySet.load()
+    }
+
+    /// Label stamped onto asset meta for fusion (nil when no secondary backup declared).
+    var secondaryBackupLabel: String? {
+        var parts: [String] = []
+        if backsUpGooglePhotos { parts.append("Google Photos") }
+        if backsUpOther { parts.append("another backup") }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " + ")
+    }
+
+    private func ffiMeta(from snap: PhotoLibraryService.AssetSnapshot) -> FfiAssetMeta {
+        FfiAssetMeta(
+            id: snap.localIdentifier,
+            createdAtUnix: Int64(snap.createdAt.timeIntervalSince1970),
+            isFavorite: snap.isFavorite,
+            isHidden: snap.isHidden,
+            isScreenshot: snap.isScreenshot,
+            isBurst: snap.isBurst,
+            isLive: snap.isLive,
+            burstId: snap.burstIdentifier,
+            latitude: snap.latitude,
+            longitude: snap.longitude,
+            pixelWidth: UInt32(snap.pixelWidth),
+            pixelHeight: UInt32(snap.pixelHeight),
+            byteSize: UInt64(max(0, snap.byteSize)),
+            isLocallyAvailable: snap.isLocallyAvailable,
+            secondaryBackupLabel: secondaryBackupLabel
+        )
+    }
+
     func bootstrap() {
         vlmInstalled = VLMModelManager.shared.isInstalled
         ensureEngine()
         refreshDevice()
-        BackgroundScanScheduler.schedule()
+        if hasUserStartedScan {
+            BackgroundScanScheduler.schedule()
+        }
         Task {
             let status = await photos.requestAuthorization()
             authStatusDescription = String(describing: status)
@@ -63,9 +143,14 @@ final class AppModel: ObservableObject {
         let db = dir.appendingPathComponent("cleaner.sqlite").path
         do {
             engine = try CleanerEngine(dbPath: db)
+            applyCategoryFilterToEngine()
         } catch {
             lastError = "Engine: \(error.localizedDescription)"
         }
+    }
+
+    private func applyCategoryFilterToEngine() {
+        engine?.setReviewCategoryLabels(labels: scanCategories.enabledReasonLabels())
     }
 
     func refreshDevice() {
@@ -79,38 +164,26 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Index PhotoKit metadata only — does not run analysis. Analysis starts when the user taps Start scan.
     func ingestLibrary(limit: Int?) async {
-        isScanning = true
-        scanProgress = "Indexing library…"
-        defer { isScanning = false }
-
         let snapshots = photos.enumerateImageAssets(limit: limit)
-        var i = 0
         for snap in snapshots {
-            let meta = FfiAssetMeta(
-                id: snap.localIdentifier,
-                createdAtUnix: Int64(snap.createdAt.timeIntervalSince1970),
-                isFavorite: snap.isFavorite,
-                isHidden: snap.isHidden,
-                isScreenshot: snap.isScreenshot,
-                isBurst: snap.isBurst,
-                isLive: snap.isLive,
-                burstId: snap.burstIdentifier,
-                latitude: snap.latitude,
-                longitude: snap.longitude,
-                pixelWidth: UInt32(snap.pixelWidth),
-                pixelHeight: UInt32(snap.pixelHeight)
-            )
-            try? engine?.upsertMeta(meta: meta)
-            i += 1
-            if i % 100 == 0 {
-                scanProgress = "Indexed \(i)/\(snapshots.count)"
-            }
+            try? engine?.upsertMeta(meta: ffiMeta(from: snap))
         }
         assetCount = (try? engine?.assetCount()) ?? UInt64(snapshots.count)
-        scanProgress = "Running fast scan…"
-        await runCascade(maxAssets: min(snapshots.count, 500))
         rebuildQueue()
+    }
+
+    /// User-initiated scan after picking categories.
+    func startScan(maxAssets: Int = 500) async {
+        guard scanCategories.hasAnyEnabled else {
+            lastError = "Pick at least one category to scan for."
+            return
+        }
+        hasUserStartedScan = true
+        BackgroundScanScheduler.schedule()
+        applyCategoryFilterToEngine()
+        await runCascade(maxAssets: maxAssets)
     }
 
     func runCascade(maxAssets: Int) async {
@@ -156,7 +229,7 @@ final class AppModel: ObservableObject {
             lastError = "Plug in your iPhone to run the deep scan (saves battery)."
             return
         }
-        await runCascade(maxAssets: 2000)
+        await startScan(maxAssets: 2000)
     }
 
     func runBackgroundScan(task: BGProcessingTask) async {
@@ -173,20 +246,7 @@ final class AppModel: ObservableObject {
         else { return }
 
         let snap = PhotoLibraryService.snapshot(from: asset)
-        let meta = FfiAssetMeta(
-            id: snap.localIdentifier,
-            createdAtUnix: Int64(snap.createdAt.timeIntervalSince1970),
-            isFavorite: snap.isFavorite,
-            isHidden: snap.isHidden,
-            isScreenshot: snap.isScreenshot,
-            isBurst: snap.isBurst,
-            isLive: snap.isLive,
-            burstId: snap.burstIdentifier,
-            latitude: snap.latitude,
-            longitude: snap.longitude,
-            pixelWidth: UInt32(snap.pixelWidth),
-            pixelHeight: UInt32(snap.pixelHeight)
-        )
+        let meta = ffiMeta(from: snap)
 
         var pixel: FfiPixelSignals?
         var face: FfiFaceFeatures?
@@ -276,10 +336,17 @@ final class AppModel: ObservableObject {
     }
 
     func rebuildQueue() {
+        applyCategoryFilterToEngine()
         reviewRemaining = (try? engine?.rebuildReviewQueue()) ?? 0
         refreshCard()
         stagedTossCount = engine?.stagedTossIds().count ?? 0
         assetCount = (try? engine?.assetCount()) ?? assetCount
+    }
+
+    func toggleCategory(_ category: ScanCategory) {
+        var next = scanCategories
+        next.toggle(category)
+        scanCategories = next
     }
 
     func refreshCard() {
@@ -288,20 +355,76 @@ final class AppModel: ObservableObject {
             cardImage = nil
             return
         }
+        let displaySize = Self.reviewDisplaySize
         currentCard = ReviewCard(
             assetId: item.assetId,
-            reasons: item.reasons.map { "\($0.kind): \($0.detail)" },
+            reasons: Self.mapReasonChips(item.reasons, clusterSize: item.clusterSize),
             junk: item.scores.junk,
             miss: item.scores.miss,
             aesthetic: item.scores.aesthetic,
             clusterSize: item.clusterSize
         )
-        photos.startCaching(identifiers: [item.assetId], size: CGSize(width: 800, height: 800))
+        photos.startCaching(identifiers: [item.assetId], size: displaySize)
+        let assetId = item.assetId
         Task {
-            if let asset = photos.asset(for: item.assetId) {
-                cardImage = await photos.requestThumbnail(for: asset, maxPixel: 900)
+            guard let asset = photos.asset(for: assetId) else { return }
+            let image = await photos.requestDisplayImage(for: asset, targetSize: displaySize)
+            if currentCard?.assetId == assetId {
+                cardImage = image
             }
         }
+    }
+
+    /// Load a high-quality image for a related (better / near-duplicate) asset.
+    func loadRelatedImage(assetId: String) async -> UIImage? {
+        guard let asset = photos.asset(for: assetId) else { return nil }
+        return await photos.requestDisplayImage(for: asset, targetSize: Self.reviewDisplaySize)
+    }
+
+    private static let clusterReasonKinds: Set<String> = [
+        "Near duplicate",
+        "Better shot exists",
+    ]
+
+    private static func mapReasonChips(_ reasons: [FfiReason], clusterSize: UInt32) -> [ReasonChip] {
+        let bestId = reasons
+            .first { $0.kind == "Near duplicate" }
+            .flatMap { parseNearDuplicateAssetId(from: $0.detail) }
+
+        var chips: [ReasonChip] = []
+
+        // Collapse better-shot + near-duplicate into one plural, tappable line.
+        if reasons.contains(where: { clusterReasonKinds.contains($0.kind) }), let bestId {
+            let count = max(Int(clusterSize), 2)
+            let title = "\(count) similar photos — tap for best"
+            chips.append(
+                ReasonChip(
+                    kind: "Similar photos",
+                    detail: title,
+                    title: title,
+                    relatedAssetId: bestId
+                )
+            )
+        }
+
+        for reason in reasons where !clusterReasonKinds.contains(reason.kind) {
+            chips.append(
+                ReasonChip(
+                    kind: reason.kind,
+                    detail: reason.detail,
+                    title: reason.detail.isEmpty ? reason.kind : reason.detail,
+                    relatedAssetId: nil
+                )
+            )
+        }
+        return chips
+    }
+
+    private static func parseNearDuplicateAssetId(from detail: String) -> String? {
+        let prefix = "Near duplicate of "
+        guard detail.hasPrefix(prefix) else { return nil }
+        let id = String(detail.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return id.isEmpty ? nil : id
     }
 
     func decide(_ decision: FfiDecision) {
@@ -338,5 +461,137 @@ final class AppModel: ObservableObject {
         case .charging: return .charging
         case .full: return .full
         }
+    }
+}
+
+// MARK: - Scan categories
+
+enum ScanCategory: String, CaseIterable, Identifiable {
+    case duplicates
+    case utilityJunk
+    case socialMisses
+    case quality
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .duplicates: return "Duplicates & better shots"
+        case .utilityJunk: return "Utility junk"
+        case .socialMisses: return "Social misses"
+        case .quality: return "Blurry / exposure"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .duplicates: return "Near-duplicates and weaker shots in a burst"
+        case .utilityJunk: return "Screenshots, receipts, pocket shots, labels"
+        case .socialMisses: return "Blinks, looking away, mouth open"
+        case .quality: return "Blurry, too dark, or blown out"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .duplicates: return "square.on.square"
+        case .utilityJunk: return "trash"
+        case .socialMisses: return "person.crop.circle.badge.exclamationmark"
+        case .quality: return "camera.metering.unknown"
+        }
+    }
+
+    /// Matches `ReasonKind::label()` in the Rust core.
+    var reasonLabels: [String] {
+        switch self {
+        case .duplicates:
+            return ["Near duplicate", "Better shot exists"]
+        case .utilityJunk:
+            return [
+                "Pocket / accidental",
+                "Screenshot",
+                "Looks like a document",
+                "Barcode / label",
+                "Utility junk",
+                "Ephemeral utility shot",
+            ]
+        case .socialMisses:
+            return ["Blink detected", "Looking away", "Mouth open (experimental)"]
+        case .quality:
+            return ["Blurry", "Too dark", "Blown out"]
+        }
+    }
+}
+
+struct ScanCategorySet: Equatable {
+    var duplicates: Bool
+    var utilityJunk: Bool
+    var socialMisses: Bool
+    var quality: Bool
+
+    static let `default` = ScanCategorySet(
+        duplicates: true,
+        utilityJunk: true,
+        socialMisses: true,
+        quality: true
+    )
+
+    private static let prefix = "scan.category."
+
+    static func load() -> ScanCategorySet {
+        let d = UserDefaults.standard
+        func flag(_ key: String, fallback: Bool) -> Bool {
+            if d.object(forKey: Self.prefix + key) == nil { return fallback }
+            return d.bool(forKey: Self.prefix + key)
+        }
+        return ScanCategorySet(
+            duplicates: flag(ScanCategory.duplicates.rawValue, fallback: true),
+            utilityJunk: flag(ScanCategory.utilityJunk.rawValue, fallback: true),
+            socialMisses: flag(ScanCategory.socialMisses.rawValue, fallback: true),
+            quality: flag(ScanCategory.quality.rawValue, fallback: true)
+        )
+    }
+
+    func save() {
+        let d = UserDefaults.standard
+        d.set(duplicates, forKey: Self.prefix + ScanCategory.duplicates.rawValue)
+        d.set(utilityJunk, forKey: Self.prefix + ScanCategory.utilityJunk.rawValue)
+        d.set(socialMisses, forKey: Self.prefix + ScanCategory.socialMisses.rawValue)
+        d.set(quality, forKey: Self.prefix + ScanCategory.quality.rawValue)
+    }
+
+    var hasAnyEnabled: Bool {
+        duplicates || utilityJunk || socialMisses || quality
+    }
+
+    private var allEnabled: Bool {
+        duplicates && utilityJunk && socialMisses && quality
+    }
+
+    func isEnabled(_ category: ScanCategory) -> Bool {
+        switch category {
+        case .duplicates: return duplicates
+        case .utilityJunk: return utilityJunk
+        case .socialMisses: return socialMisses
+        case .quality: return quality
+        }
+    }
+
+    mutating func toggle(_ category: ScanCategory) {
+        switch category {
+        case .duplicates: duplicates.toggle()
+        case .utilityJunk: utilityJunk.toggle()
+        case .socialMisses: socialMisses.toggle()
+        case .quality: quality.toggle()
+        }
+    }
+
+    /// Empty = no filter (all categories). Otherwise only matching reason labels.
+    func enabledReasonLabels() -> [String] {
+        guard hasAnyEnabled else { return ["__none__"] }
+        if allEnabled { return [] }
+        return ScanCategory.allCases
+            .filter { isEnabled($0) }
+            .flatMap(\.reasonLabels)
     }
 }

@@ -610,6 +610,12 @@ public protocol CleanerEngineProtocol : AnyObject {
     
     func setChangeToken(token: String) throws 
     
+    /**
+     * Restrict the review queue to assets flagged with any of these reason labels.
+     * Pass an empty list to include every category.
+     */
+    func setReviewCategoryLabels(labels: [String]) 
+    
     func setWeightsToml(toml: String) throws 
     
     func stagedTossIds()  -> [String]
@@ -785,6 +791,17 @@ open func setChangeToken(token: String)throws  {try rustCallWithError(FfiConvert
 }
 }
     
+    /**
+     * Restrict the review queue to assets flagged with any of these reason labels.
+     * Pass an empty list to include every category.
+     */
+open func setReviewCategoryLabels(labels: [String]) {try! rustCall() {
+    uniffi_cleaner_ffi_fn_method_cleanerengine_set_review_category_labels(self.uniffiClonePointer(),
+        FfiConverterSequenceString.lower(labels),$0
+    )
+}
+}
+    
 open func setWeightsToml(toml: String)throws  {try rustCallWithError(FfiConverterTypeCleanerError.lift) {
     uniffi_cleaner_ffi_fn_method_cleanerengine_set_weights_toml(self.uniffiClonePointer(),
         FfiConverterString.lower(toml),$0
@@ -881,10 +898,13 @@ public struct FfiAssetMeta {
     public var longitude: Double?
     public var pixelWidth: UInt32
     public var pixelHeight: UInt32
+    public var byteSize: UInt64
+    public var isLocallyAvailable: Bool
+    public var secondaryBackupLabel: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, createdAtUnix: Int64, isFavorite: Bool, isHidden: Bool, isScreenshot: Bool, isBurst: Bool, isLive: Bool, burstId: String?, latitude: Double?, longitude: Double?, pixelWidth: UInt32, pixelHeight: UInt32) {
+    public init(id: String, createdAtUnix: Int64, isFavorite: Bool, isHidden: Bool, isScreenshot: Bool, isBurst: Bool, isLive: Bool, burstId: String?, latitude: Double?, longitude: Double?, pixelWidth: UInt32, pixelHeight: UInt32, byteSize: UInt64, isLocallyAvailable: Bool, secondaryBackupLabel: String?) {
         self.id = id
         self.createdAtUnix = createdAtUnix
         self.isFavorite = isFavorite
@@ -897,6 +917,9 @@ public struct FfiAssetMeta {
         self.longitude = longitude
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
+        self.byteSize = byteSize
+        self.isLocallyAvailable = isLocallyAvailable
+        self.secondaryBackupLabel = secondaryBackupLabel
     }
 }
 
@@ -940,6 +963,15 @@ extension FfiAssetMeta: Equatable, Hashable {
         if lhs.pixelHeight != rhs.pixelHeight {
             return false
         }
+        if lhs.byteSize != rhs.byteSize {
+            return false
+        }
+        if lhs.isLocallyAvailable != rhs.isLocallyAvailable {
+            return false
+        }
+        if lhs.secondaryBackupLabel != rhs.secondaryBackupLabel {
+            return false
+        }
         return true
     }
 
@@ -956,6 +988,9 @@ extension FfiAssetMeta: Equatable, Hashable {
         hasher.combine(longitude)
         hasher.combine(pixelWidth)
         hasher.combine(pixelHeight)
+        hasher.combine(byteSize)
+        hasher.combine(isLocallyAvailable)
+        hasher.combine(secondaryBackupLabel)
     }
 }
 
@@ -978,7 +1013,10 @@ public struct FfiConverterTypeFfiAssetMeta: FfiConverterRustBuffer {
                 latitude: FfiConverterOptionDouble.read(from: &buf), 
                 longitude: FfiConverterOptionDouble.read(from: &buf), 
                 pixelWidth: FfiConverterUInt32.read(from: &buf), 
-                pixelHeight: FfiConverterUInt32.read(from: &buf)
+                pixelHeight: FfiConverterUInt32.read(from: &buf), 
+                byteSize: FfiConverterUInt64.read(from: &buf), 
+                isLocallyAvailable: FfiConverterBool.read(from: &buf), 
+                secondaryBackupLabel: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -995,6 +1033,9 @@ public struct FfiConverterTypeFfiAssetMeta: FfiConverterRustBuffer {
         FfiConverterOptionDouble.write(value.longitude, into: &buf)
         FfiConverterUInt32.write(value.pixelWidth, into: &buf)
         FfiConverterUInt32.write(value.pixelHeight, into: &buf)
+        FfiConverterUInt64.write(value.byteSize, into: &buf)
+        FfiConverterBool.write(value.isLocallyAvailable, into: &buf)
+        FfiConverterOptionString.write(value.secondaryBackupLabel, into: &buf)
     }
 }
 
@@ -2908,6 +2949,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cleaner_ffi_checksum_method_cleanerengine_set_change_token() != 9941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cleaner_ffi_checksum_method_cleanerengine_set_review_category_labels() != 44506) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cleaner_ffi_checksum_method_cleanerengine_set_weights_toml() != 49523) {

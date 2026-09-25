@@ -218,6 +218,9 @@ mod tests {
                 longitude: Some(-122.42),
                 pixel_width: 100,
                 pixel_height: 100,
+                byte_size: 0,
+                is_locally_available: true,
+                secondary_backup_label: None,
             },
             features: AssetFeatures {
                 pixel: Some(PixelSignals {

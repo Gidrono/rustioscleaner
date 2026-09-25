@@ -1,10 +1,12 @@
 import SwiftUI
+import UIKit
 
 /// Keep / Toss / Skip card stack with reason chips and undo.
 struct SwipeReviewView: View {
     @EnvironmentObject private var model: AppModel
     @State private var offset: CGSize = .zero
     @State private var showCommit = false
+    @State private var relatedPresentation: RelatedPhotoPresentation?
 
     var body: some View {
         NavigationStack {
@@ -70,6 +72,10 @@ struct SwipeReviewView: View {
             } message: {
                 Text("Apple will ask you to confirm. Photos stay recoverable for 30 days.")
             }
+            .sheet(item: $relatedPresentation) { presentation in
+                RelatedPhotoSheet(presentation: presentation)
+                    .environmentObject(model)
+            }
         }
     }
 
@@ -91,10 +97,6 @@ struct SwipeReviewView: View {
             .clipShape(RoundedRectangle(cornerRadius: 20))
 
             VStack(alignment: .leading, spacing: 4) {
-                if card.clusterSize > 1 {
-                    Text("Burst · \(card.clusterSize) similar")
-                        .font(.caption.bold())
-                }
                 Text(String(format: "junk %.0f%% · miss %.0f%% · aesthetic %.0f%%",
                             card.junk * 100, card.miss * 100, card.aesthetic * 100))
                     .font(.caption2.monospaced())
@@ -128,17 +130,52 @@ struct SwipeReviewView: View {
             .opacity(min(1, abs(offset.width + offset.height) / 120))
     }
 
-    private func reasonChips(_ reasons: [String]) -> some View {
+    private func reasonChips(_ reasons: [AppModel.ReasonChip]) -> some View {
         FlowLayout(spacing: 8) {
-            ForEach(reasons, id: \.self) { reason in
-                Text(reason)
-                    .font(.caption)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.accentColor.opacity(0.15), in: Capsule())
+            ForEach(reasons) { reason in
+                if let relatedId = reason.relatedAssetId {
+                    Button {
+                        relatedPresentation = RelatedPhotoPresentation(
+                            assetId: relatedId,
+                            title: sheetTitle(for: reason)
+                        )
+                    } label: {
+                        chipLabel(reason.title, tappable: true)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens the related photo")
+                } else {
+                    chipLabel(reason.title, tappable: false)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func chipLabel(_ title: String, tappable: Bool) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .multilineTextAlignment(.leading)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            if tappable {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func sheetTitle(for reason: AppModel.ReasonChip) -> String {
+        switch reason.kind {
+        case "Similar photos", "Better shot exists", "Near duplicate":
+            return "Best shot"
+        default:
+            return reason.kind
+        }
     }
 
     private var drag: some Gesture {
@@ -173,12 +210,52 @@ struct SwipeReviewView: View {
     }
 
     private func accessibilityLabel(for card: AppModel.ReviewCard) -> String {
-        let chips = card.reasons.joined(separator: ", ")
+        let chips = card.reasons.map(\.title).joined(separator: ", ")
         return "Photo suggested for review. Reasons: \(chips)"
     }
 }
 
-/// Simple wrapping layout for reason chips.
+private struct RelatedPhotoPresentation: Identifiable {
+    var id: String { assetId }
+    let assetId: String
+    let title: String
+}
+
+private struct RelatedPhotoSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    let presentation: RelatedPhotoPresentation
+    @State private var image: UIImage?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black.opacity(0.05))
+                } else {
+                    ProgressView("Loading…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .navigationTitle(presentation.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+            .task(id: presentation.assetId) {
+                image = await model.loadRelatedImage(assetId: presentation.assetId)
+            }
+        }
+    }
+}
+
+/// Wrapping layout for reason chips; never reports width wider than the proposal.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
 
@@ -205,8 +282,20 @@ struct FlowLayout: Layout {
         var rowH: CGFloat = 0
         var width: CGFloat = 0
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            if x + size.width > maxW, x > 0 {
+            let proposed = maxW.isFinite
+                ? ProposedViewSize(width: maxW, height: nil)
+                : ProposedViewSize.unspecified
+            var size = sub.sizeThatFits(proposed)
+            if maxW.isFinite, size.width > maxW {
+                size.width = maxW
+            }
+            if maxW.isFinite, x + size.width > maxW, x > 0 {
+                x = 0
+                y += rowH + spacing
+                rowH = 0
+            }
+            // Full-width chips stack vertically for readability.
+            if maxW.isFinite, size.width >= maxW * 0.9, x > 0 {
                 x = 0
                 y += rowH + spacing
                 rowH = 0
@@ -214,8 +303,15 @@ struct FlowLayout: Layout {
             frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
             rowH = max(rowH, size.height)
             x += size.width + spacing
-            width = max(width, x)
+            let rowEnd = x > 0 ? x - spacing : 0
+            width = max(width, rowEnd)
         }
-        return (CGSize(width: width, height: y + rowH), frames)
+        let totalWidth: CGFloat
+        if maxW.isFinite {
+            totalWidth = min(max(width, 0), maxW)
+        } else {
+            totalWidth = width
+        }
+        return (CGSize(width: totalWidth, height: y + rowH), frames)
     }
 }

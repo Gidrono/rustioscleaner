@@ -42,6 +42,10 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         public let longitude: Double?
         public let pixelWidth: Int
         public let pixelHeight: Int
+        /// Approximate on-disk bytes (photo + paired Live resources when present).
+        public let byteSize: Int64
+        /// False when Optimize iPhone Storage left only an iCloud stub on device.
+        public let isLocallyAvailable: Bool
     }
 
     public func enumerateImageAssets(limit: Int? = nil) -> [AssetSnapshot] {
@@ -74,8 +78,40 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
             latitude: loc?.coordinate.latitude,
             longitude: loc?.coordinate.longitude,
             pixelWidth: asset.pixelWidth,
-            pixelHeight: asset.pixelHeight
+            pixelHeight: asset.pixelHeight,
+            byteSize: approximateByteSize(of: asset),
+            isLocallyAvailable: isLocallyAvailable(of: asset)
         )
+    }
+
+    /// True when primary photo (and Live paired video) resources are on-device.
+    public static func isLocallyAvailable(of asset: PHAsset) -> Bool {
+        let resources = PHAssetResource.assetResources(for: asset)
+        let primaryTypes: Set<PHAssetResourceType> = [
+            .photo, .fullSizePhoto, .pairedVideo, .fullSizePairedVideo, .adjustmentBasePhoto,
+        ]
+        let primary = resources.filter { primaryTypes.contains($0.type) }
+        let check = primary.isEmpty ? resources : primary
+        guard !check.isEmpty else { return true }
+        return check.allSatisfy(\.isLocallyAvailable)
+    }
+
+    /// Sum PhotoKit resource sizes; fall back to a compressed pixel estimate.
+    public static func approximateByteSize(of asset: PHAsset) -> Int64 {
+        let resources = PHAssetResource.assetResources(for: asset)
+        var total: Int64 = 0
+        for resource in resources {
+            if let size = resource.value(forKey: "fileSize") as? Int64 {
+                total += size
+            } else if let size = resource.value(forKey: "fileSize") as? Int {
+                total += Int64(size)
+            } else if let size = resource.value(forKey: "fileSize") as? NSNumber {
+                total += size.int64Value
+            }
+        }
+        if total > 0 { return total }
+        // Rough HEIC-ish estimate when PhotoKit omits fileSize.
+        return Int64(asset.pixelWidth) * Int64(asset.pixelHeight) / 4
     }
 
     public func asset(for id: String) -> PHAsset? {
@@ -95,14 +131,59 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
             opts.isNetworkAccessAllowed = true
             opts.isSynchronous = false
             let target = CGSize(width: maxPixel, height: maxPixel)
+            var resumed = false
             imageManager.requestImage(
                 for: asset,
                 targetSize: target,
                 contentMode: .aspectFill,
                 options: opts
             ) { image, info in
+                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                let error = info?[PHImageErrorKey] as? Error
                 let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                guard !resumed else { return }
+                if cancelled || error != nil {
+                    resumed = true
+                    cont.resume(returning: nil)
+                    return
+                }
                 if !degraded {
+                    resumed = true
+                    cont.resume(returning: image)
+                }
+            }
+        }
+    }
+
+    /// High-quality image for on-screen review (not analysis thumbnails).
+    public func requestDisplayImage(
+        for asset: PHAsset,
+        targetSize: CGSize
+    ) async -> UIImage? {
+        await withCheckedContinuation { cont in
+            let opts = PHImageRequestOptions()
+            opts.deliveryMode = .highQualityFormat
+            opts.resizeMode = .exact
+            opts.isNetworkAccessAllowed = true
+            opts.isSynchronous = false
+            var resumed = false
+            imageManager.requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: opts
+            ) { image, info in
+                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                let error = info?[PHImageErrorKey] as? Error
+                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                guard !resumed else { return }
+                if cancelled || error != nil {
+                    resumed = true
+                    cont.resume(returning: nil)
+                    return
+                }
+                if !degraded {
+                    resumed = true
                     cont.resume(returning: image)
                 }
             }

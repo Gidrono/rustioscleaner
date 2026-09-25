@@ -40,6 +40,12 @@ pub struct AssetMeta {
     pub longitude: Option<f64>,
     pub pixel_width: u32,
     pub pixel_height: u32,
+    /// On-disk bytes from PhotoKit resources (0 if unknown).
+    pub byte_size: u64,
+    /// True when all primary PhotoKit resources are on-device (not Optimize Storage stubs).
+    pub is_locally_available: bool,
+    /// User-declared secondary backup label (e.g. "Google Photos"). Not device-verified.
+    pub secondary_backup_label: Option<String>,
 }
 
 /// Human-readable reason a photo was flagged.
@@ -59,6 +65,10 @@ pub enum ReasonKind {
     NearDuplicate,
     LowerAesthetic,
     VlmEphemeral,
+    /// Full-resolution file lives in iCloud (Optimize iPhone Storage).
+    CloudOriginal,
+    /// User declared a secondary backup (Google Photos / other) — not API-verified.
+    SecondaryBackup,
     Custom,
 }
 
@@ -79,6 +89,8 @@ impl ReasonKind {
             Self::NearDuplicate => "Near duplicate",
             Self::LowerAesthetic => "Better shot exists",
             Self::VlmEphemeral => "Ephemeral utility shot",
+            Self::CloudOriginal => "iCloud original",
+            Self::SecondaryBackup => "Secondary backup",
             Self::Custom => "Flagged",
         }
     }

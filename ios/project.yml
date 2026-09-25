@@ -45,7 +45,8 @@ targets:
         INFOPLIST_FILE: App/Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: App/Resources/ContextCleaner.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        DEVELOPMENT_TEAM: ""
+        DEVELOPMENT_TEAM: YAD78W8647
+        CODE_SIGN_STYLE: Automatic
         OTHER_LDFLAGS: "$(inherited) -lc++"
         FRAMEWORK_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/Frameworks"
         HEADER_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/Generated"
@@ -54,8 +55,21 @@ targets:
     preBuildScripts:
       - name: Ensure Rust XCFramework
         script: |
-          if [ ! -d "${PROJECT_DIR}/Frameworks/CleanerCore.xcframework" ]; then
-            echo "warning: CleanerCore.xcframework missing — run scripts/build-xcframework.sh"
+          FRAMEWORK="${PROJECT_DIR}/Frameworks/CleanerCore.xcframework"
+          BUILD_SCRIPT="${PROJECT_DIR}/../scripts/build-xcframework.sh"
+          STAMP="${FRAMEWORK}/Info.plist"
+          NEEDS_BUILD=0
+          if [ ! -d "$FRAMEWORK" ]; then
+            NEEDS_BUILD=1
+          else
+            NEWER=$(find "${PROJECT_DIR}/../core" -type f \( -name '*.rs' -o -name '*.toml' \) -newer "$STAMP" 2>/dev/null | head -1)
+            if [ -n "$NEWER" ]; then
+              NEEDS_BUILD=1
+            fi
+          fi
+          if [ "$NEEDS_BUILD" = "1" ]; then
+            echo "note: rebuilding CleanerCore.xcframework (Rust sources changed)"
+            /bin/bash "$BUILD_SCRIPT" || echo "error: run scripts/build-xcframework.sh manually"
           fi
         basedOnDependencyAnalysis: false
 

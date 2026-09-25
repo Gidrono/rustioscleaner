@@ -52,6 +52,9 @@ pub struct FfiAssetMeta {
     pub longitude: Option<f64>,
     pub pixel_width: u32,
     pub pixel_height: u32,
+    pub byte_size: u64,
+    pub is_locally_available: bool,
+    pub secondary_backup_label: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug, Default)]
@@ -229,6 +232,9 @@ fn meta_from_ffi(m: &FfiAssetMeta) -> AssetMeta {
         longitude: m.longitude,
         pixel_width: m.pixel_width,
         pixel_height: m.pixel_height,
+        byte_size: m.byte_size,
+        is_locally_available: m.is_locally_available,
+        secondary_backup_label: m.secondary_backup_label.clone(),
     }
 }
 
@@ -334,6 +340,9 @@ struct EngineInner {
     store: Store,
     queue: ReviewQueue,
     weights: FusionWeights,
+    /// When non-empty, review queue only keeps items whose reasons match these labels
+    /// (see `ReasonKind::label`). Empty means all categories.
+    enabled_review_kinds: Vec<String>,
 }
 
 #[uniffi::export]
@@ -346,8 +355,15 @@ impl CleanerEngine {
                 store,
                 queue: ReviewQueue::default(),
                 weights: FusionWeights::default(),
+                enabled_review_kinds: Vec::new(),
             }),
         })
+    }
+
+    /// Restrict the review queue to assets flagged with any of these reason labels.
+    /// Pass an empty list to include every category.
+    pub fn set_review_category_labels(&self, labels: Vec<String>) {
+        self.inner.lock().unwrap().enabled_review_kinds = labels;
     }
 
     pub fn set_weights_toml(&self, toml: String) -> Result<(), CleanerError> {
@@ -480,10 +496,22 @@ impl CleanerEngine {
 
     pub fn rebuild_review_queue(&self) -> Result<u32, CleanerError> {
         let mut eng = self.inner.lock().unwrap();
-        let q = eng.store.build_review_queue(
+        let mut q = eng.store.build_review_queue(
             eng.weights.junk_queue_threshold,
             eng.weights.miss_queue_threshold,
         )?;
+        if !eng.enabled_review_kinds.is_empty() {
+            let allowed: std::collections::HashSet<&str> = eng
+                .enabled_review_kinds
+                .iter()
+                .map(String::as_str)
+                .collect();
+            q.pending.retain(|item| {
+                item.reasons
+                    .iter()
+                    .any(|r| allowed.contains(r.kind.label()))
+            });
+        }
         let n = q.remaining() as u32;
         eng.queue = q;
         Ok(n)

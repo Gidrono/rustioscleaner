@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 "#;
 
+const MIGRATION_V2: &str = r#"
+ALTER TABLE assets ADD COLUMN byte_size INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_assets_byte_size ON assets(byte_size);
+"#;
+
+const MIGRATION_V3: &str = r#"
+ALTER TABLE assets ADD COLUMN is_locally_available INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE assets ADD COLUMN secondary_backup_label TEXT;
+"#;
+
 pub fn run(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -71,6 +81,34 @@ pub fn run(conn: &Connection) -> Result<()> {
         conn.execute_batch(MIGRATION_V1)?;
         conn.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (1, strftime('%s','now'))",
+            [],
+        )?;
+    }
+    let current: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if current < 2 {
+        conn.execute_batch(MIGRATION_V2)?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (2, strftime('%s','now'))",
+            [],
+        )?;
+    }
+    let current: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if current < 3 {
+        conn.execute_batch(MIGRATION_V3)?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (3, strftime('%s','now'))",
             [],
         )?;
     }

@@ -42,8 +42,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO assets (
                 id, created_at, is_favorite, is_hidden, is_screenshot, is_burst, is_live,
-                burst_id, latitude, longitude, pixel_width, pixel_height, tier_completed
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0)
+                burst_id, latitude, longitude, pixel_width, pixel_height, byte_size,
+                is_locally_available, secondary_backup_label, tier_completed
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,0)
              ON CONFLICT(id) DO UPDATE SET
                 created_at=excluded.created_at,
                 is_favorite=excluded.is_favorite,
@@ -55,7 +56,10 @@ impl Store {
                 latitude=excluded.latitude,
                 longitude=excluded.longitude,
                 pixel_width=excluded.pixel_width,
-                pixel_height=excluded.pixel_height",
+                pixel_height=excluded.pixel_height,
+                byte_size=excluded.byte_size,
+                is_locally_available=excluded.is_locally_available,
+                secondary_backup_label=excluded.secondary_backup_label",
             params![
                 meta.id.as_str(),
                 meta.created_at.timestamp(),
@@ -69,6 +73,9 @@ impl Store {
                 meta.longitude,
                 meta.pixel_width,
                 meta.pixel_height,
+                meta.byte_size as i64,
+                meta.is_locally_available as i32,
+                meta.secondary_backup_label,
             ],
         )?;
         Ok(())
@@ -108,7 +115,8 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT id, created_at, is_favorite, is_hidden, is_screenshot, is_burst, is_live,
-                        burst_id, latitude, longitude, pixel_width, pixel_height,
+                        burst_id, latitude, longitude, pixel_width, pixel_height, byte_size,
+                        is_locally_available, secondary_backup_label,
                         features_json, junk, miss, aesthetic, reasons_json,
                         cluster_id, is_best_in_cluster, tier_completed, analyzed_at
                  FROM assets WHERE id=?1",
@@ -146,16 +154,26 @@ impl Store {
     }
 
     pub fn build_review_queue(&self, junk_thresh: f32, miss_thresh: f32) -> Result<ReviewQueue> {
+        // Heaviest on disk first so early tosses free the most space.
+        // Secondary-backup assets get a slightly softer threshold (matches fusion slack).
+        let soft_junk = (junk_thresh - 0.08).max(0.35);
+        let soft_miss = (miss_thresh - 0.08).max(0.40);
         let mut stmt = self.conn.prepare(
             "SELECT id, junk, miss, aesthetic, reasons_json, cluster_id, is_best_in_cluster
              FROM assets
              WHERE is_favorite=0 AND is_hidden=0
-               AND (junk >= ?1 OR miss >= ?2)
+               AND (
+                 CASE
+                   WHEN secondary_backup_label IS NOT NULL AND length(trim(secondary_backup_label)) > 0
+                     THEN (junk >= ?3 OR miss >= ?4)
+                   ELSE (junk >= ?1 OR miss >= ?2)
+                 END
+               )
                AND (cluster_id IS NULL OR is_best_in_cluster=0)
-             ORDER BY MAX(junk, miss) DESC",
+             ORDER BY byte_size DESC, (pixel_width * pixel_height) DESC, MAX(junk, miss) DESC",
         )?;
         let items = stmt
-            .query_map(params![junk_thresh, miss_thresh], |row| {
+            .query_map(params![junk_thresh, miss_thresh, soft_junk, soft_miss], |row| {
                 let id: String = row.get(0)?;
                 let reasons_json: String = row.get(4)?;
                 let reasons: Vec<Reason> = serde_json::from_str(&reasons_json).unwrap_or_default();
@@ -277,8 +295,8 @@ fn decision_str(d: Decision) -> &'static str {
 fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AssetRecord> {
     let id: String = row.get(0)?;
     let created: i64 = row.get(1)?;
-    let features_json: Option<String> = row.get(12)?;
-    let reasons_json: Option<String> = row.get(16)?;
+    let features_json: Option<String> = row.get(15)?;
+    let reasons_json: Option<String> = row.get(19)?;
     let features: AssetFeatures = features_json
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok())
@@ -287,7 +305,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AssetRecord> {
         .as_deref()
         .and_then(|j| serde_json::from_str(j).ok())
         .unwrap_or_default();
-    let analyzed: Option<i64> = row.get(20)?;
+    let analyzed: Option<i64> = row.get(23)?;
     Ok(AssetRecord {
         meta: AssetMeta {
             id: AssetId::new(id),
@@ -305,17 +323,20 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> Result<AssetRecord> {
             longitude: row.get(9)?,
             pixel_width: row.get::<_, i64>(10)? as u32,
             pixel_height: row.get::<_, i64>(11)? as u32,
+            byte_size: row.get::<_, i64>(12)? as u64,
+            is_locally_available: row.get::<_, i32>(13)? != 0,
+            secondary_backup_label: row.get(14)?,
         },
         features,
         scores: Scores {
-            junk: row.get(13)?,
-            miss: row.get(14)?,
-            aesthetic: row.get(15)?,
+            junk: row.get(16)?,
+            miss: row.get(17)?,
+            aesthetic: row.get(18)?,
         },
         reasons,
-        cluster_id: row.get(17)?,
-        is_best_in_cluster: row.get::<_, i32>(18)? != 0,
-        tier_completed: row.get::<_, i32>(19)? as u8,
+        cluster_id: row.get(20)?,
+        is_best_in_cluster: row.get::<_, i32>(21)? != 0,
+        tier_completed: row.get::<_, i32>(22)? as u8,
         analyzed_at: analyzed.and_then(|t| Utc.timestamp_opt(t, 0).single()),
     })
 }
@@ -327,25 +348,29 @@ mod tests {
     use cleaner_core::signals::PixelSignals;
     use cleaner_core::types::AssetFeatures;
 
-    #[test]
-    fn upsert_and_queue() {
-        let store = Store::open_in_memory().unwrap();
-        let meta = AssetMeta {
-            id: AssetId::new("p1"),
-            created_at: Utc::now(),
-            is_favorite: false,
-            is_hidden: false,
-            is_screenshot: false,
-            is_burst: false,
-            is_live: false,
-            burst_id: None,
-            latitude: None,
-            longitude: None,
-            pixel_width: 100,
-            pixel_height: 100,
-        };
-        let record = AssetRecord {
-            meta,
+    fn junk_record(id: &str, w: u32, h: u32, junk: f32) -> AssetRecord {
+        junk_record_with_bytes(id, w, h, junk, 0)
+    }
+
+    fn junk_record_with_bytes(id: &str, w: u32, h: u32, junk: f32, byte_size: u64) -> AssetRecord {
+        AssetRecord {
+            meta: AssetMeta {
+                id: AssetId::new(id),
+                created_at: Utc::now(),
+                is_favorite: false,
+                is_hidden: false,
+                is_screenshot: false,
+                is_burst: false,
+                is_live: false,
+                burst_id: None,
+                latitude: None,
+                longitude: None,
+                pixel_width: w,
+                pixel_height: h,
+                byte_size,
+                is_locally_available: true,
+                secondary_backup_label: None,
+            },
             features: AssetFeatures {
                 pixel: Some(PixelSignals {
                     is_pocket_shot: true,
@@ -354,7 +379,7 @@ mod tests {
                 ..Default::default()
             },
             scores: Scores {
-                junk: 0.9,
+                junk,
                 miss: 0.0,
                 aesthetic: 0.1,
             },
@@ -363,10 +388,39 @@ mod tests {
             is_best_in_cluster: false,
             tier_completed: 1,
             analyzed_at: Some(Utc::now()),
-        };
-        store.save_analysis(&record).unwrap();
+        }
+    }
+
+    #[test]
+    fn upsert_and_queue() {
+        let store = Store::open_in_memory().unwrap();
+        store.save_analysis(&junk_record("p1", 100, 100, 0.9)).unwrap();
         assert_eq!(store.asset_count().unwrap(), 1);
         let q = store.build_review_queue(0.5, 0.5).unwrap();
         assert_eq!(q.remaining(), 1);
+    }
+
+    #[test]
+    fn review_queue_orders_heaviest_first() {
+        let store = Store::open_in_memory().unwrap();
+        // Same pixel area — byte_size must decide order (not ingest/date order).
+        store
+            .save_analysis(&junk_record_with_bytes("small", 4032, 3024, 0.99, 1_000_000))
+            .unwrap();
+        store
+            .save_analysis(&junk_record_with_bytes("large", 4032, 3024, 0.6, 8_000_000))
+            .unwrap();
+        store
+            .save_analysis(&junk_record_with_bytes("medium", 4032, 3024, 0.8, 3_000_000))
+            .unwrap();
+
+        let q = store.build_review_queue(0.5, 0.5).unwrap();
+        assert_eq!(q.remaining(), 3);
+        let ids: Vec<_> = q
+            .pending
+            .iter()
+            .map(|i| i.asset_id.as_str().to_string())
+            .collect();
+        assert_eq!(ids, vec!["large", "medium", "small"]);
     }
 }
