@@ -122,7 +122,7 @@ struct SwipeReviewView: View {
 
     private func stamp(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.title.bold())
+            .font(Font.title.bold())
             .foregroundStyle(color)
             .padding(8)
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(color, lineWidth: 3))
