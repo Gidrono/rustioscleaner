@@ -173,24 +173,28 @@ impl Store {
              ORDER BY byte_size DESC, (pixel_width * pixel_height) DESC, MAX(junk, miss) DESC",
         )?;
         let items = stmt
-            .query_map(params![junk_thresh, miss_thresh, soft_junk, soft_miss], |row| {
-                let id: String = row.get(0)?;
-                let reasons_json: String = row.get(4)?;
-                let reasons: Vec<Reason> = serde_json::from_str(&reasons_json).unwrap_or_default();
-                let cluster_id: Option<String> = row.get(5)?;
-                Ok(ReviewItem {
-                    asset_id: AssetId::new(id),
-                    scores: Scores {
-                        junk: row.get(1)?,
-                        miss: row.get(2)?,
-                        aesthetic: row.get(3)?,
-                    },
-                    reasons,
-                    cluster_id,
-                    is_best_in_cluster: row.get::<_, i32>(6)? != 0,
-                    cluster_size: 1,
-                })
-            })?
+            .query_map(
+                params![junk_thresh, miss_thresh, soft_junk, soft_miss],
+                |row| {
+                    let id: String = row.get(0)?;
+                    let reasons_json: String = row.get(4)?;
+                    let reasons: Vec<Reason> =
+                        serde_json::from_str(&reasons_json).unwrap_or_default();
+                    let cluster_id: Option<String> = row.get(5)?;
+                    Ok(ReviewItem {
+                        asset_id: AssetId::new(id),
+                        scores: Scores {
+                            junk: row.get(1)?,
+                            miss: row.get(2)?,
+                            aesthetic: row.get(3)?,
+                        },
+                        reasons,
+                        cluster_id,
+                        is_best_in_cluster: row.get::<_, i32>(6)? != 0,
+                        cluster_size: 1,
+                    })
+                },
+            )?
             .filter_map(|r| r.ok())
             .collect();
         Ok(ReviewQueue::new(items))
@@ -394,7 +398,9 @@ mod tests {
     #[test]
     fn upsert_and_queue() {
         let store = Store::open_in_memory().unwrap();
-        store.save_analysis(&junk_record("p1", 100, 100, 0.9)).unwrap();
+        store
+            .save_analysis(&junk_record("p1", 100, 100, 0.9))
+            .unwrap();
         assert_eq!(store.asset_count().unwrap(), 1);
         let q = store.build_review_queue(0.5, 0.5).unwrap();
         assert_eq!(q.remaining(), 1);
@@ -405,13 +411,17 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         // Same pixel area — byte_size must decide order (not ingest/date order).
         store
-            .save_analysis(&junk_record_with_bytes("small", 4032, 3024, 0.99, 1_000_000))
+            .save_analysis(&junk_record_with_bytes(
+                "small", 4032, 3024, 0.99, 1_000_000,
+            ))
             .unwrap();
         store
             .save_analysis(&junk_record_with_bytes("large", 4032, 3024, 0.6, 8_000_000))
             .unwrap();
         store
-            .save_analysis(&junk_record_with_bytes("medium", 4032, 3024, 0.8, 3_000_000))
+            .save_analysis(&junk_record_with_bytes(
+                "medium", 4032, 3024, 0.8, 3_000_000,
+            ))
             .unwrap();
 
         let q = store.build_review_queue(0.5, 0.5).unwrap();

@@ -193,9 +193,8 @@ pub fn fuse_scores(
     if let Some(label) = meta.secondary_backup_label.as_deref() {
         let label = label.trim();
         if !label.is_empty() {
-            let has_substantive_reason = reasons
-                .iter()
-                .any(|r| r.kind != ReasonKind::CloudOriginal);
+            let has_substantive_reason =
+                reasons.iter().any(|r| r.kind != ReasonKind::CloudOriginal);
             let nearly_queued = scores.junk >= weights.junk_queue_threshold - backup_slack
                 || scores.miss >= weights.miss_queue_threshold - backup_slack
                 || has_substantive_reason;
@@ -318,7 +317,10 @@ mod tests {
         m.is_locally_available = false;
         let r = fuse_scores(&m, &AssetFeatures::default(), &FusionWeights::default());
         assert!(!r.should_queue);
-        assert!(r.reasons.iter().any(|x| x.kind == ReasonKind::CloudOriginal));
+        assert!(r
+            .reasons
+            .iter()
+            .any(|x| x.kind == ReasonKind::CloudOriginal));
     }
 
     #[test]
