@@ -85,6 +85,7 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
     }
 
     /// True when primary photo (and Live paired video) resources are on-device.
+    /// Uses KVC `locallyAvailable` (not in the public Photos SDK headers).
     public static func isLocallyAvailable(of asset: PHAsset) -> Bool {
         let resources = PHAssetResource.assetResources(for: asset)
         let primaryTypes: Set<PHAssetResourceType> = [
@@ -93,7 +94,9 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         let primary = resources.filter { primaryTypes.contains($0.type) }
         let check = primary.isEmpty ? resources : primary
         guard !check.isEmpty else { return true }
-        return check.allSatisfy(\.isLocallyAvailable)
+        return check.allSatisfy { resource in
+            (resource.value(forKey: "locallyAvailable") as? Bool) ?? true
+        }
     }
 
     /// Sum PhotoKit resource sizes; fall back to a compressed pixel estimate.
@@ -227,6 +230,17 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
     }
 
     // MARK: - Delete (Recently Deleted)
+
+    /// Sum approximate on-disk sizes for the given local identifiers (before delete).
+    public func totalByteSize(identifiers: [String]) -> Int64 {
+        guard !identifiers.isEmpty else { return 0 }
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
+        var total: Int64 = 0
+        assets.enumerateObjects { asset, _, _ in
+            total += Self.approximateByteSize(of: asset)
+        }
+        return total
+    }
 
     public func deleteAssets(identifiers: [String]) async throws {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
