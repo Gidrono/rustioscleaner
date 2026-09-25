@@ -341,8 +341,10 @@ mod tests {
         };
         // looking_away_miss default 0.70 → should_queue with or without backup;
         // use a custom soft miss below default threshold.
-        let mut weights = FusionWeights::default();
-        weights.looking_away_miss = 0.55; // below default miss_queue_threshold 0.60
+        let weights = FusionWeights {
+            looking_away_miss: 0.55, // below default miss_queue_threshold 0.60
+            ..Default::default()
+        };
         let without = {
             let mut plain = meta();
             plain.secondary_backup_label = None;
