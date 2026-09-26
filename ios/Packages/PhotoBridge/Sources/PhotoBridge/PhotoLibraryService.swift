@@ -164,65 +164,81 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
 
     // MARK: - Images
 
+    /// Fast UI thumbnail — opportunistic first frame, never full-file decode first.
     public func requestThumbnail(
         for asset: PHAsset,
         maxPixel: CGFloat = 384
     ) async -> UIImage? {
-        if let data = await requestImageData(for: asset),
-           let image = UIImage(data: data)
-        {
-            return Self.downscaled(image, maxPixel: maxPixel)
+        let size = CGSize(width: maxPixel, height: maxPixel)
+        if let image = await requestImage(
+            for: asset,
+            targetSize: size,
+            deliveryMode: .opportunistic,
+            resizeMode: .fast,
+            timeoutSeconds: 8,
+            finishOnFirstFrame: true
+        ) {
+            return image
         }
         return await requestImage(
             for: asset,
-            targetSize: CGSize(width: maxPixel, height: maxPixel),
-            deliveryMode: .highQualityFormat,
+            targetSize: size,
+            deliveryMode: .fastFormat,
             resizeMode: .fast,
-            timeoutSeconds: 20
+            timeoutSeconds: 5,
+            finishOnFirstFrame: true
         )
     }
 
-    /// High-quality image for on-screen review (not analysis thumbnails).
+    /// Image for Keep or Toss review cards.
     ///
-    /// Uses opportunistic delivery so a cached/degraded frame can appear immediately,
-    /// then upgrades when the final image arrives. Falls back to image-data and a
-    /// smaller thumbnail so flaky iCloud / oversized requests don’t blank the card.
+    /// Returns as soon as PhotoKit delivers any usable frame (usually cached, milliseconds
+    /// for on-device photos). The underlying request stays alive so `onUpdate` can sharpen
+    /// when a higher-quality frame arrives. Avoids full `requestImageData` (slow / heavy).
     public func requestDisplayImage(
         for asset: PHAsset,
         targetSize: CGSize,
         onUpdate: ((UIImage) -> Void)? = nil
     ) async -> UIImage? {
+        // aspectFit so portrait/landscape stay uncropped; UI letterboxes with black.
         if let image = await requestImage(
             for: asset,
             targetSize: targetSize,
+            contentMode: .aspectFit,
             deliveryMode: .opportunistic,
             resizeMode: .fast,
             onUpdate: onUpdate,
-            timeoutSeconds: 30
+            timeoutSeconds: 12,
+            finishOnFirstFrame: true
         ) {
             return image
         }
-        if let data = await requestImageData(for: asset),
-           let image = UIImage(data: data)
-        {
-            onUpdate?(image)
-            return image
-        }
-        let fallbackPixel = min(max(targetSize.width, targetSize.height), 1024)
+        // Smaller / faster fallbacks before giving up.
         if let image = await requestImage(
             for: asset,
-            targetSize: CGSize(width: fallbackPixel, height: fallbackPixel),
-            deliveryMode: .highQualityFormat,
+            targetSize: CGSize(width: 512, height: 512),
+            contentMode: .aspectFit,
+            deliveryMode: .opportunistic,
             resizeMode: .fast,
             onUpdate: onUpdate,
-            timeoutSeconds: 25
+            timeoutSeconds: 8,
+            finishOnFirstFrame: true
         ) {
             return image
         }
-        return nil
+        return await requestImage(
+            for: asset,
+            targetSize: CGSize(width: 256, height: 256),
+            contentMode: .aspectFit,
+            deliveryMode: .fastFormat,
+            resizeMode: .fast,
+            onUpdate: onUpdate,
+            timeoutSeconds: 5,
+            finishOnFirstFrame: true
+        )
     }
 
-    /// Full image bytes via PhotoKit’s data API (more reliable than progressive requestImage).
+    /// Full image bytes via PhotoKit’s data API (analysis path — not for review UI).
     public func requestImageData(for asset: PHAsset) async -> Data? {
         await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             let opts = PHImageRequestOptions()
@@ -240,14 +256,19 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
             ) { data, _, _, info in
                 let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
                 let error = info?[PHImageErrorKey] as? Error
+                let inCloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
                 if let data, !data.isEmpty {
                     state.finish(data)
                     return
                 }
-                if cancelled || error != nil {
+                if cancelled {
+                    state.finish(nil)
+                    return
+                }
+                // Early cloud errors are often non-terminal; wait for a later callback.
+                if error != nil, !inCloud {
                     state.finish(nil)
                 }
-                // Else wait — iCloud assets may call again with real bytes.
             }
             state.setRequestID(requestID)
 
@@ -261,16 +282,20 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         }
     }
 
-    /// PhotoKit may call the handler multiple times (degraded → final). Surface the
-    /// first usable frame via `onUpdate`, but only finish the continuation on final /
-    /// cancel / error / timeout so we don’t abandon a still-loading iCloud asset.
+    /// PhotoKit may call the handler multiple times (degraded → final).
+    ///
+    /// - `finishOnFirstFrame`: resume as soon as any image arrives (review UI). The request
+    ///   is left running so later `onUpdate` callbacks can still upgrade quality.
+    /// - Otherwise finish on final / cancel / definitive error / timeout.
     private func requestImage(
         for asset: PHAsset,
         targetSize: CGSize,
+        contentMode: PHImageContentMode = .aspectFill,
         deliveryMode: PHImageRequestOptionsDeliveryMode,
         resizeMode: PHImageRequestOptionsResizeMode,
         onUpdate: ((UIImage) -> Void)? = nil,
-        timeoutSeconds: TimeInterval = 15
+        timeoutSeconds: TimeInterval = 15,
+        finishOnFirstFrame: Bool = false
     ) async -> UIImage? {
         await withCheckedContinuation { (cont: CheckedContinuation<UIImage?, Never>) in
             let opts = PHImageRequestOptions()
@@ -287,28 +312,46 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
             let requestID = manager.requestImage(
                 for: asset,
                 targetSize: targetSize,
-                contentMode: .aspectFill,
+                contentMode: contentMode,
                 options: opts
             ) { image, info in
                 let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
                 let error = info?[PHImageErrorKey] as? Error
                 let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                let inCloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
 
                 if let image {
                     state.noteImage(image)
                     onUpdate?(image)
+                    if finishOnFirstFrame {
+                        // Resume await immediately; do not cancel — upgrades still arrive.
+                        state.finishWithLatest()
+                        return
+                    }
                 }
 
-                // Finish on terminal states. Prefer keeping the latest frame (including
-                // degraded) rather than returning nil when PhotoKit errors after a preview.
-                let shouldFinish = cancelled || error != nil || !degraded
-                if shouldFinish {
+                if cancelled {
+                    state.finishWithLatest()
+                    return
+                }
+
+                // Don't treat early iCloud/network errors as terminal when no frame yet.
+                if error != nil, state.currentImage() == nil {
+                    if !inCloud {
+                        state.finishWithLatest()
+                    }
+                    return
+                }
+
+                if error != nil || !degraded {
                     state.finishWithLatest()
                 }
             }
             state.setRequestID(requestID)
 
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
+                // Only cancel when we never resumed — if we already returned a preview,
+                // leave the request alive so quality upgrades can still reach onUpdate.
                 guard let id = state.takeTimeoutCancelID() else { return }
                 if id != PHInvalidImageRequestID {
                     manager.cancelImageRequest(id)
@@ -331,9 +374,10 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         guard let image = await requestImage(
             for: asset,
             targetSize: CGSize(width: maxPixel, height: maxPixel),
-            deliveryMode: .highQualityFormat,
+            deliveryMode: .opportunistic,
             resizeMode: .fast,
-            timeoutSeconds: 20
+            timeoutSeconds: 12,
+            finishOnFirstFrame: true
         ),
         let rgba = Self.rgbaPixels(from: image, maxPixel: maxPixel)
         else { return nil }
@@ -368,20 +412,6 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         return (UInt32(w), UInt32(h), rgba)
     }
 
-    private static func downscaled(_ image: UIImage, maxPixel: CGFloat) -> UIImage {
-        let size = image.size
-        let longest = max(size.width, size.height)
-        guard longest > maxPixel, longest > 0 else { return image }
-        let scale = maxPixel / longest
-        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
-        format.opaque = false
-        return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: newSize))
-        }
-    }
-
     /// PhotoKit UIImages are sometimes CIImage-backed with a nil `cgImage`.
     public static func cgImage(from image: UIImage) -> CGImage? {
         if let cg = image.cgImage { return cg }
@@ -404,14 +434,21 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
     }
 
     public func startCaching(identifiers: [String], size: CGSize) {
+        guard !identifiers.isEmpty else { return }
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
         var list: [PHAsset] = []
         assets.enumerateObjects { a, _, _ in list.append(a) }
+        guard !list.isEmpty else { return }
+        let opts = PHImageRequestOptions()
+        opts.deliveryMode = .opportunistic
+        opts.resizeMode = .fast
+        opts.isNetworkAccessAllowed = true
+        opts.version = .current
         imageManager.startCachingImages(
             for: list,
             targetSize: size,
-            contentMode: .aspectFill,
-            options: nil
+            contentMode: .aspectFit,
+            options: opts
         )
     }
 
@@ -490,6 +527,12 @@ private final class ImageRequestState: @unchecked Sendable {
         lock.lock()
         latest = image
         lock.unlock()
+    }
+
+    func currentImage() -> UIImage? {
+        lock.lock()
+        defer { lock.unlock() }
+        return latest
     }
 
     func takeTimeoutCancelID() -> PHImageRequestID? {

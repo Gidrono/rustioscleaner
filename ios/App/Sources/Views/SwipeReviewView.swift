@@ -178,9 +178,12 @@ struct SwipeReviewView: View {
         ZStack(alignment: .bottomLeading) {
             Group {
                 if let image = model.cardImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
+                    Color.black
+                        .overlay {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                        }
                 } else if model.cardImageLoadFailed {
                     Color.gray.opacity(0.2)
                         .overlay {
@@ -524,7 +527,8 @@ struct ReviewScoreBadge: View {
     }
 }
 
-/// Undo / remaining / Delete row that compresses instead of overflowing the screen.
+/// Undo / remaining / Delete row. Equal columns so Delete always has room for
+/// counts through at least 1k (no trailing ellipsis — it looked like truncation).
 struct ReviewBottomChrome: View {
     let remaining: Int
     let stagedCount: Int
@@ -537,26 +541,37 @@ struct ReviewBottomChrome: View {
         HStack(spacing: 8) {
             Button("Undo", action: onUndo)
                 .disabled(!undoEnabled)
-                .layoutPriority(1)
+                .buttonStyle(.borderless)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             Text("\(remaining) left")
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .minimumScaleFactor(0.5)
                 .frame(maxWidth: .infinity)
                 .accessibilityIdentifier("review.remaining")
 
             Button(action: onDelete) {
-                Text("Delete \(stagedCount)…")
+                Text(deleteLabel)
+                    .monospacedDigit()
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+                    .minimumScaleFactor(0.5)
             }
             .disabled(!deleteEnabled)
-            .layoutPriority(1)
+            .buttonStyle(.borderless)
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .accessibilityIdentifier("review.deleteButton")
         }
         .frame(maxWidth: .infinity)
         .accessibilityIdentifier("review.bottomChrome")
+    }
+
+    /// Compact past 9,999 so a third-column still fits on narrow widths.
+    private var deleteLabel: String {
+        if stagedCount >= 10_000 {
+            return "Delete \(stagedCount / 1_000)k"
+        }
+        return "Delete \(stagedCount)"
     }
 }
 

@@ -707,6 +707,19 @@ final class AppModel: ObservableObject {
     }
 
     func refreshCard() {
+        // Skip assets PhotoKit can no longer resolve (deleted / limited-library gaps)
+        // instead of stranding the user on "Couldn't load photo".
+        var drainedMissing = 0
+        while let front = engine?.peekReview(), photos.asset(for: front.assetId) == nil {
+            _ = try? engine?.decide(decision: .skip)
+            drainedMissing += 1
+            if drainedMissing >= 64 { break }
+        }
+        if drainedMissing > 0 {
+            reviewRemaining = engine?.remainingReview() ?? 0
+            stagedTossCount = engine?.stagedTossIds().count ?? stagedTossCount
+        }
+
         guard let item = engine?.peekReview() else {
             currentCard = nil
             cardImage = nil
@@ -733,14 +746,17 @@ final class AppModel: ObservableObject {
         Task {
             guard generation == self.cardLoadGeneration else { return }
             guard let asset = photos.asset(for: assetId) else {
-                if generation == self.cardLoadGeneration, self.currentCard?.assetId == assetId {
-                    self.cardImageLoadFailed = true
-                }
+                // Race: asset disappeared after peek — advance without flashing failure.
+                guard generation == self.cardLoadGeneration else { return }
+                _ = try? self.engine?.decide(decision: .skip)
+                self.reviewRemaining = self.engine?.remainingReview() ?? 0
+                self.refreshCard()
                 return
             }
             let applyPreview: (UIImage) -> Void = { preview in
                 Task { @MainActor in
                     guard generation == self.cardLoadGeneration, self.currentCard?.assetId == assetId else { return }
+                    // Never let a late nil-result overwrite a frame that already arrived.
                     self.cardImage = preview
                     self.cardImageLoadFailed = false
                 }
