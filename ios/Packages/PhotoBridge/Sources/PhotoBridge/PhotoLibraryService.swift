@@ -1,6 +1,8 @@
 import Foundation
 import Photos
+import PhotosUI
 import UIKit
+import CoreImage
 
 /// Photo library access, enumeration, thumbnail loading, and batched deletes.
 public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, @unchecked Sendable {
@@ -25,6 +27,45 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
 
     public var authorizationStatus: PHAuthorizationStatus {
         PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    }
+
+    /// Present Apple’s limited-library picker so the user can include newly taken photos.
+    @MainActor
+    public func presentLimitedLibraryPicker() async {
+        guard authorizationStatus == .limited else { return }
+        guard let host = Self.keyWindowRootViewController() else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let state = OnceResume()
+            if #available(iOS 15.0, *) {
+                PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: host) { _ in
+                    state.resume {
+                        cont.resume()
+                    }
+                }
+            } else {
+                PHPhotoLibrary.shared().presentLimitedLibraryPicker(from: host)
+                // No completion on iOS 14 — resume shortly after presentation returns.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    state.resume {
+                        cont.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private static func keyWindowRootViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+            ?? scenes.first?.windows.first
+        var top = window?.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
     }
 
     // MARK: - Enumeration
@@ -127,55 +168,123 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         for asset: PHAsset,
         maxPixel: CGFloat = 384
     ) async -> UIImage? {
-        await requestImage(
+        if let data = await requestImageData(for: asset),
+           let image = UIImage(data: data)
+        {
+            return Self.downscaled(image, maxPixel: maxPixel)
+        }
+        return await requestImage(
             for: asset,
             targetSize: CGSize(width: maxPixel, height: maxPixel),
-            deliveryMode: .fastFormat,
-            resizeMode: .fast
+            deliveryMode: .highQualityFormat,
+            resizeMode: .fast,
+            timeoutSeconds: 20
         )
     }
 
     /// High-quality image for on-screen review (not analysis thumbnails).
     ///
     /// Uses opportunistic delivery so a cached/degraded frame can appear immediately,
-    /// then upgrades when the final image arrives. Waiting only for `!degraded` with a
-    /// single continuation can hang forever (spinner never clears).
+    /// then upgrades when the final image arrives. Falls back to image-data and a
+    /// smaller thumbnail so flaky iCloud / oversized requests don’t blank the card.
     public func requestDisplayImage(
         for asset: PHAsset,
         targetSize: CGSize,
         onUpdate: ((UIImage) -> Void)? = nil
     ) async -> UIImage? {
-        // Non-nil onUpdate enables “finish on first frame” so we never hang if PhotoKit
-        // never delivers a non-degraded callback; still forwards upgrades when provided.
-        let progress = onUpdate ?? { _ in }
-        return await requestImage(
+        if let image = await requestImage(
             for: asset,
             targetSize: targetSize,
             deliveryMode: .opportunistic,
             resizeMode: .fast,
-            onUpdate: progress
-        )
+            onUpdate: onUpdate,
+            timeoutSeconds: 30
+        ) {
+            return image
+        }
+        if let data = await requestImageData(for: asset),
+           let image = UIImage(data: data)
+        {
+            onUpdate?(image)
+            return image
+        }
+        let fallbackPixel = min(max(targetSize.width, targetSize.height), 1024)
+        if let image = await requestImage(
+            for: asset,
+            targetSize: CGSize(width: fallbackPixel, height: fallbackPixel),
+            deliveryMode: .highQualityFormat,
+            resizeMode: .fast,
+            onUpdate: onUpdate,
+            timeoutSeconds: 25
+        ) {
+            return image
+        }
+        return nil
     }
 
-    /// PhotoKit may call the handler multiple times (degraded → final). We always surface
-    /// the first usable image, upgrade via `onUpdate`, and finish on final / error / cancel.
+    /// Full image bytes via PhotoKit’s data API (more reliable than progressive requestImage).
+    public func requestImageData(for asset: PHAsset) async -> Data? {
+        await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            let opts = PHImageRequestOptions()
+            opts.isNetworkAccessAllowed = true
+            opts.isSynchronous = false
+            opts.deliveryMode = .highQualityFormat
+            opts.resizeMode = .none
+            opts.version = .current
+
+            let state = DataRequestState(continuation: cont)
+            let manager = PHImageManager.default()
+            let requestID = manager.requestImageDataAndOrientation(
+                for: asset,
+                options: opts
+            ) { data, _, _, info in
+                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+                let error = info?[PHImageErrorKey] as? Error
+                if let data, !data.isEmpty {
+                    state.finish(data)
+                    return
+                }
+                if cancelled || error != nil {
+                    state.finish(nil)
+                }
+                // Else wait — iCloud assets may call again with real bytes.
+            }
+            state.setRequestID(requestID)
+
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 25) {
+                guard let id = state.takeTimeoutCancelID() else { return }
+                if id != PHInvalidImageRequestID {
+                    manager.cancelImageRequest(id)
+                }
+                state.finish(nil)
+            }
+        }
+    }
+
+    /// PhotoKit may call the handler multiple times (degraded → final). Surface the
+    /// first usable frame via `onUpdate`, but only finish the continuation on final /
+    /// cancel / error / timeout so we don’t abandon a still-loading iCloud asset.
     private func requestImage(
         for asset: PHAsset,
         targetSize: CGSize,
         deliveryMode: PHImageRequestOptionsDeliveryMode,
         resizeMode: PHImageRequestOptionsResizeMode,
-        onUpdate: ((UIImage) -> Void)? = nil
+        onUpdate: ((UIImage) -> Void)? = nil,
+        timeoutSeconds: TimeInterval = 15
     ) async -> UIImage? {
-        await withCheckedContinuation { cont in
+        await withCheckedContinuation { (cont: CheckedContinuation<UIImage?, Never>) in
             let opts = PHImageRequestOptions()
             opts.deliveryMode = deliveryMode
             opts.resizeMode = resizeMode
             opts.isNetworkAccessAllowed = true
             opts.isSynchronous = false
-            let lock = NSLock()
-            var resumed = false
-            var latest: UIImage?
-            imageManager.requestImage(
+            opts.version = .current
+
+            let state = ImageRequestState(continuation: cont)
+            // Default manager for one-shot loads — caching manager can stall/miss.
+            let manager = PHImageManager.default()
+
+            let requestID = manager.requestImage(
                 for: asset,
                 targetSize: targetSize,
                 contentMode: .aspectFill,
@@ -186,25 +295,25 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
                 let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
 
                 if let image {
-                    lock.lock()
-                    latest = image
-                    lock.unlock()
+                    state.noteImage(image)
                     onUpdate?(image)
                 }
 
-                // Complete on final / cancel / error. If a progressive `onUpdate` consumer
-                // already has a frame, also finish on first image so we never hang when
-                // PhotoKit never delivers `!degraded` (common with iCloud / caching).
-                let shouldFinish =
-                    cancelled || error != nil || !degraded
-                    || (onUpdate != nil && image != nil)
-                lock.lock()
-                let already = resumed
-                let result = latest
-                if shouldFinish && !already { resumed = true }
-                lock.unlock()
-                guard shouldFinish, !already else { return }
-                cont.resume(returning: result)
+                // Finish on terminal states. Prefer keeping the latest frame (including
+                // degraded) rather than returning nil when PhotoKit errors after a preview.
+                let shouldFinish = cancelled || error != nil || !degraded
+                if shouldFinish {
+                    state.finishWithLatest()
+                }
+            }
+            state.setRequestID(requestID)
+
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
+                guard let id = state.takeTimeoutCancelID() else { return }
+                if id != PHInvalidImageRequestID {
+                    manager.cancelImageRequest(id)
+                }
+                state.finishWithLatest()
             }
         }
     }
@@ -213,12 +322,37 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
         for asset: PHAsset,
         maxPixel: Int = 256
     ) async -> (width: UInt32, height: UInt32, rgba: [UInt8])? {
-        guard let image = await requestThumbnail(for: asset, maxPixel: CGFloat(maxPixel)),
-              let cg = image.cgImage
+        if let data = await requestImageData(for: asset),
+           let image = UIImage(data: data),
+           let rgba = Self.rgbaPixels(from: image, maxPixel: maxPixel)
+        {
+            return rgba
+        }
+        guard let image = await requestImage(
+            for: asset,
+            targetSize: CGSize(width: maxPixel, height: maxPixel),
+            deliveryMode: .highQualityFormat,
+            resizeMode: .fast,
+            timeoutSeconds: 20
+        ),
+        let rgba = Self.rgbaPixels(from: image, maxPixel: maxPixel)
         else { return nil }
+        return rgba
+    }
 
-        let w = cg.width
-        let h = cg.height
+    /// Downscale and convert to RGBA8 for the Rust pixel analyzer.
+    public static func rgbaPixels(
+        from image: UIImage,
+        maxPixel: Int
+    ) -> (width: UInt32, height: UInt32, rgba: [UInt8])? {
+        guard let cg = cgImage(from: image) else { return nil }
+        let srcW = cg.width
+        let srcH = cg.height
+        guard srcW > 0, srcH > 0 else { return nil }
+        let longest = max(srcW, srcH)
+        let scale = longest > maxPixel ? (CGFloat(maxPixel) / CGFloat(longest)) : 1
+        let w = max(1, Int((CGFloat(srcW) * scale).rounded()))
+        let h = max(1, Int((CGFloat(srcH) * scale).rounded()))
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         guard let ctx = CGContext(
             data: &rgba,
@@ -229,8 +363,44 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
+        ctx.interpolationQuality = .medium
         ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         return (UInt32(w), UInt32(h), rgba)
+    }
+
+    private static func downscaled(_ image: UIImage, maxPixel: CGFloat) -> UIImage {
+        let size = image.size
+        let longest = max(size.width, size.height)
+        guard longest > maxPixel, longest > 0 else { return image }
+        let scale = maxPixel / longest
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+    }
+
+    /// PhotoKit UIImages are sometimes CIImage-backed with a nil `cgImage`.
+    public static func cgImage(from image: UIImage) -> CGImage? {
+        if let cg = image.cgImage { return cg }
+        if let ci = image.ciImage {
+            let context = CIContext(options: nil)
+            if let cg = context.createCGImage(ci, from: ci.extent) {
+                return cg
+            }
+        }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = false
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let rendered = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return rendered.cgImage
     }
 
     public func startCaching(identifiers: [String], size: CGSize) {
@@ -279,5 +449,96 @@ public final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver, 
 
     public func photoLibraryDidChange(_ changeInstance: PHChange) {
         changeHandler?(changeInstance)
+    }
+}
+
+private final class OnceResume: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+
+    func resume(_ body: () -> Void) {
+        lock.lock()
+        let already = resumed
+        if !already { resumed = true }
+        lock.unlock()
+        guard !already else { return }
+        body()
+    }
+}
+
+// MARK: - Request state boxes
+
+/// Thread-safe box for a single PhotoKit image request continuation.
+private final class ImageRequestState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    private var latest: UIImage?
+    private var requestID: PHImageRequestID = PHInvalidImageRequestID
+    private let continuation: CheckedContinuation<UIImage?, Never>
+
+    init(continuation: CheckedContinuation<UIImage?, Never>) {
+        self.continuation = continuation
+    }
+
+    func setRequestID(_ id: PHImageRequestID) {
+        lock.lock()
+        requestID = id
+        lock.unlock()
+    }
+
+    func noteImage(_ image: UIImage) {
+        lock.lock()
+        latest = image
+        lock.unlock()
+    }
+
+    func takeTimeoutCancelID() -> PHImageRequestID? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !resumed else { return nil }
+        return requestID
+    }
+
+    func finishWithLatest() {
+        lock.lock()
+        let already = resumed
+        let result = latest
+        if !already { resumed = true }
+        lock.unlock()
+        guard !already else { return }
+        continuation.resume(returning: result)
+    }
+}
+
+private final class DataRequestState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    private var requestID: PHImageRequestID = PHInvalidImageRequestID
+    private let continuation: CheckedContinuation<Data?, Never>
+
+    init(continuation: CheckedContinuation<Data?, Never>) {
+        self.continuation = continuation
+    }
+
+    func setRequestID(_ id: PHImageRequestID) {
+        lock.lock()
+        requestID = id
+        lock.unlock()
+    }
+
+    func takeTimeoutCancelID() -> PHImageRequestID? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !resumed else { return nil }
+        return requestID
+    }
+
+    func finish(_ data: Data?) {
+        lock.lock()
+        let already = resumed
+        if !already { resumed = true }
+        lock.unlock()
+        guard !already else { return }
+        continuation.resume(returning: data)
     }
 }

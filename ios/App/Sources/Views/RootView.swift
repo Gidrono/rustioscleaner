@@ -2,16 +2,17 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var tab = 0
 
     var body: some View {
-        TabView(selection: $tab) {
+        TabView(selection: $model.selectedTab) {
             HomeView()
                 .tabItem { Label("Home", systemImage: "sparkles") }
                 .tag(0)
-            SwipeReviewView()
-                .tabItem { Label("Review", systemImage: "rectangle.stack") }
-                .tag(1)
+            NavigationStack {
+                SwipeReviewView()
+            }
+            .tabItem { Label("Review", systemImage: "rectangle.stack") }
+            .tag(1)
             ScanView()
                 .tabItem { Label("Scan", systemImage: "bolt.horizontal.circle") }
                 .tag(2)
@@ -27,6 +28,20 @@ struct RootView: View {
         } message: {
             Text(model.lastError ?? "")
         }
+        .alert("Scan finished", isPresented: Binding(
+            get: { model.scanFinishedMessage != nil },
+            set: { if !$0 { model.scanFinishedMessage = nil } }
+        )) {
+            if model.reviewRemaining > 0 {
+                Button("Review") {
+                    model.scanFinishedMessage = nil
+                    model.openReview()
+                }
+            }
+            Button("OK", role: .cancel) { model.scanFinishedMessage = nil }
+        } message: {
+            Text(model.scanFinishedMessage ?? "")
+        }
     }
 }
 
@@ -38,12 +53,15 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     header
+                    if model.showOnboarding || model.photosAccessIsLimited {
+                        photoAccessCard
+                    }
                     categoryPicker
                     startScanButton
                     stats
                     if model.reviewRemaining > 0 {
-                        NavigationLink {
-                            SwipeReviewView()
+                        Button {
+                            model.openReview()
                         } label: {
                             Label("Review \(model.reviewRemaining) suggestions", systemImage: "hand.draw")
                                 .frame(maxWidth: .infinity)
@@ -58,12 +76,47 @@ struct HomeView: View {
             .navigationTitle("Context Cleaner")
             .overlay {
                 if model.isScanning {
-                    ProgressView(model.scanProgress)
+                    ProgressView(model.scanProgress.isEmpty ? "Scanning…" : model.scanProgress)
                         .padding()
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
             }
         }
+    }
+
+    private var photoAccessCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(
+                model.photosAccessIsLimited ? "Update photo selection" : "Photo access needed",
+                systemImage: "photo.on.rectangle.angled"
+            )
+            .font(.headline)
+            Text(
+                model.photosAccessIsLimited
+                    ? "You’re on Limited Access. Choose the photos Context Cleaner can see (including new ones), then scan again."
+                    : "Context Cleaner needs access to your photo library to find cleanup candidates. Nothing leaves your iPhone."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            if model.photosAccessIsLimited {
+                Button("Choose more photos…") {
+                    Task { await model.updateLimitedPhotoSelection() }
+                }
+                .buttonStyle(.borderedProminent)
+                Button("Refresh index") {
+                    Task { await model.refreshPhotoLibrary() }
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Button("Allow photo access") {
+                    Task { await model.requestPhotoAccess() }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var header: some View {

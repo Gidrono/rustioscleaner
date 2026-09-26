@@ -170,6 +170,7 @@ impl Store {
                  END
                )
                AND (cluster_id IS NULL OR is_best_in_cluster=0)
+               AND id NOT IN (SELECT asset_id FROM decisions WHERE decision = 'keep')
              ORDER BY byte_size DESC, (pixel_width * pixel_height) DESC, MAX(junk, miss) DESC",
         )?;
         let items = stmt
@@ -204,6 +205,15 @@ impl Store {
         self.conn.execute(
             "INSERT INTO decisions (asset_id, decision, decided_at) VALUES (?1,?2,?3)",
             params![id.as_str(), decision_str(decision), Utc::now().timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a Keep so the asset can re-enter the review queue (e.g. after Undo).
+    pub fn clear_keep_decisions(&self, id: &AssetId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM decisions WHERE asset_id = ?1 AND decision = 'keep'",
+            params![id.as_str()],
         )?;
         Ok(())
     }
@@ -432,5 +442,23 @@ mod tests {
             .map(|i| i.asset_id.as_str().to_string())
             .collect();
         assert_eq!(ids, vec!["large", "medium", "small"]);
+    }
+
+    #[test]
+    fn kept_assets_excluded_from_review_queue() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .save_analysis(&junk_record("p1", 100, 100, 0.9))
+            .unwrap();
+        let id = AssetId::new("p1");
+        store.record_decision(&id, Decision::Keep).unwrap();
+
+        let q = store.build_review_queue(0.5, 0.5).unwrap();
+        assert_eq!(q.remaining(), 0);
+
+        store.clear_keep_decisions(&id).unwrap();
+        let q = store.build_review_queue(0.5, 0.5).unwrap();
+        assert_eq!(q.remaining(), 1);
+        assert_eq!(q.peek().unwrap().asset_id.as_str(), "p1");
     }
 }

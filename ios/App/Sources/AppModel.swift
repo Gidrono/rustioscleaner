@@ -23,8 +23,14 @@ final class AppModel: ObservableObject {
     @Published var sessionFreedBytes: Int64 = 0
     /// Latest successful delete batch; drives the cleaned-summary sheet.
     @Published var lastCleanResult: CleanResult?
+    /// True while PhotoKit delete confirmation / commit is in flight.
+    @Published var isCommittingDeletes = false
     @Published var isScanning = false
     @Published var scanProgress: String = ""
+    /// Non-error status after a scan completes (shown as an info alert, not "Something went wrong").
+    @Published var scanFinishedMessage: String?
+    /// Root tab selection (0 Home, 1 Review, 2 Scan, 3 Settings).
+    @Published var selectedTab = 0
     @Published var thermalLabel = "nominal"
     @Published var powerLabel = "battery"
     @Published var canRunVLM = false
@@ -32,6 +38,13 @@ final class AppModel: ObservableObject {
     @Published var lastError: String?
     @Published var showOnboarding = false
     @Published var cardImage: UIImage?
+    /// True when the current card’s PhotoKit load finished without an image.
+    @Published var cardImageLoadFailed = false
+
+    /// True when the user granted Limited Photos access (needs picker to add new shots).
+    var photosAccessIsLimited: Bool {
+        photos.authorizationStatus == .limited
+    }
 
     /// User-declared secondary backups (not API-verified). Softens queue thresholds.
     @Published var backsUpGooglePhotos: Bool {
@@ -57,6 +70,9 @@ final class AppModel: ObservableObject {
 
     private var engine: CleanerEngine?
     private let photos = PhotoLibraryService.shared
+    /// Shared bootstrap ingest so Start scan never races an empty DB.
+    private var ingestTask: Task<Void, Never>?
+    private var cardLoadGeneration: UInt64 = 0
     private var hasUserStartedScan: Bool {
         get { UserDefaults.standard.bool(forKey: Self.hasScannedKey) }
         set { UserDefaults.standard.set(newValue, forKey: Self.hasScannedKey) }
@@ -104,6 +120,39 @@ final class AppModel: ObservableObject {
         scanCategories = ScanCategorySet.load()
     }
 
+    /// Seeds review UI state without PhotoKit / Rust. Used by layout overflow tests.
+    func seedReviewLayoutFixture(
+        remaining: UInt32 = 172,
+        stagedCount: Int = 0,
+        junk: Float = 0,
+        miss: Float = 0.7,
+        aesthetic: Float = 0.73,
+        reasonTitles: [String] = [
+            "Similar photos (3)",
+            "Looks like: a photo of a package tracking slip"
+        ]
+    ) {
+        reviewRemaining = remaining
+        stagedTossCount = stagedCount
+        cardImage = UIImage(systemName: "photo")
+        cardImageLoadFailed = false
+        currentCard = ReviewCard(
+            assetId: "layout-fixture",
+            reasons: reasonTitles.enumerated().map { index, title in
+                ReasonChip(
+                    kind: "Fixture",
+                    detail: title,
+                    title: title,
+                    relatedAssetId: index == 0 ? "related-fixture" : nil
+                )
+            },
+            junk: junk,
+            miss: miss,
+            aesthetic: aesthetic,
+            clusterSize: 3
+        )
+    }
+
     /// Label stamped onto asset meta for fusion (nil when no secondary backup declared).
     var secondaryBackupLabel: String? {
         var parts: [String] = []
@@ -140,15 +189,87 @@ final class AppModel: ObservableObject {
         if hasUserStartedScan {
             BackgroundScanScheduler.schedule()
         }
-        Task {
+        ingestTask = Task {
             let status = await photos.requestAuthorization()
             authStatusDescription = String(describing: status)
             if status == .authorized || status == .limited {
+                showOnboarding = false
                 await ingestLibrary(limit: nil)
             } else {
                 showOnboarding = true
             }
         }
+    }
+
+    /// Re-request Photos access (from the permission onboarding card).
+    func requestPhotoAccess() async {
+        let status = await photos.requestAuthorization()
+        authStatusDescription = String(describing: status)
+        switch status {
+        case .authorized:
+            showOnboarding = false
+            await refreshPhotoLibrary()
+        case .limited:
+            showOnboarding = false
+            await presentLimitedLibraryPickerIfNeeded()
+            await refreshPhotoLibrary()
+        case .denied, .restricted:
+            showOnboarding = true
+            openSystemPhotoSettings()
+            lastError = "Photo access is off. Enable Context Cleaner in Settings → Privacy → Photos, then return here."
+        default:
+            showOnboarding = true
+            lastError = "Photo access is required to scan your library."
+        }
+    }
+
+    /// Re-index the current library and drop deleted / unselected photo IDs from the work queue.
+    func refreshPhotoLibrary() async {
+        scanProgress = "Refreshing photo index…"
+        let wasScanning = isScanning
+        if !wasScanning { isScanning = true }
+        defer {
+            if !wasScanning { isScanning = false }
+            if scanProgress == "Refreshing photo index…" { scanProgress = "" }
+        }
+        await ingestLibrary(limit: nil, pruneMissing: true)
+    }
+
+    /// Let the user add newly taken photos when using Limited Photos access.
+    func updateLimitedPhotoSelection() async {
+        let status = photos.authorizationStatus
+        if status == .notDetermined {
+            await requestPhotoAccess()
+            return
+        }
+        if status == .denied || status == .restricted {
+            openSystemPhotoSettings()
+            return
+        }
+        if status == .limited {
+            await presentLimitedLibraryPickerIfNeeded()
+        }
+        await refreshPhotoLibrary()
+    }
+
+    private func presentLimitedLibraryPickerIfNeeded() async {
+        guard photos.authorizationStatus == .limited else { return }
+        await photos.presentLimitedLibraryPicker()
+    }
+
+    private func openSystemPhotoSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    private func ensureIngested() async {
+        if let ingestTask {
+            await ingestTask.value
+        }
+        let status = photos.authorizationStatus
+        guard status == .authorized || status == .limited else { return }
+        // Always re-index: users delete/take photos between launches.
+        await ingestLibrary(limit: nil, pruneMissing: true)
     }
 
     private func ensureEngine() {
@@ -180,13 +301,37 @@ final class AppModel: ObservableObject {
     }
 
     /// Index PhotoKit metadata only — does not run analysis. Analysis starts when the user taps Start scan.
-    func ingestLibrary(limit: Int?) async {
+    func ingestLibrary(limit: Int?, pruneMissing: Bool = false) async {
         let snapshots = photos.enumerateImageAssets(limit: limit)
+        let liveIds = Set(snapshots.map(\.localIdentifier))
         for snap in snapshots {
             try? engine?.upsertMeta(meta: ffiMeta(from: snap))
         }
-        assetCount = (try? engine?.assetCount()) ?? UInt64(snapshots.count)
+        if pruneMissing {
+            await pruneUnreachablePendingAssets(liveIds: liveIds)
+        }
+        // Show how many photos PhotoKit currently exposes (not stale SQLite rows).
+        assetCount = UInt64(liveIds.count)
         rebuildQueue()
+    }
+
+    /// Mark pending SQLite rows that are no longer in the live PhotoKit set so scans don't stall.
+    private func pruneUnreachablePendingAssets(liveIds: Set<String>) async {
+        guard engine != nil else { return }
+        refreshDevice()
+        let power = mapPower(DeviceRuntime.currentPower())
+        var guardCount = 0
+        while guardCount < 40 {
+            guardCount += 1
+            guard let batch = try? engine?.nextWorkBatch(power: power, ramGb: DeviceRuntime.ramGB()),
+                  !batch.assetIds.isEmpty
+            else { break }
+            let missing = batch.assetIds.filter { !liveIds.contains($0) }
+            if missing.isEmpty { break }
+            for id in missing {
+                await markAssetUnreachable(id: id)
+            }
+        }
     }
 
     /// User-initiated scan after picking categories.
@@ -195,20 +340,58 @@ final class AppModel: ObservableObject {
             lastError = "Pick at least one category to scan for."
             return
         }
+        isScanning = true
+        scanProgress = "Indexing photos…"
+        await ensureIngested()
+
+        let status = photos.authorizationStatus
+        guard status == .authorized || status == .limited else {
+            isScanning = false
+            scanProgress = ""
+            showOnboarding = true
+            lastError = "Photo access is required to scan your library."
+            return
+        }
+        guard engine != nil else {
+            isScanning = false
+            scanProgress = ""
+            lastError = lastError ?? "Couldn’t start the analysis engine."
+            return
+        }
+        guard assetCount > 0 else {
+            isScanning = false
+            scanProgress = ""
+            lastError = "No photos found in your library."
+            return
+        }
+
         hasUserStartedScan = true
         BackgroundScanScheduler.schedule()
         applyCategoryFilterToEngine()
-        await runCascade(maxAssets: maxAssets)
+        await runCascade(maxAssets: maxAssets, alreadyScanning: true, announceCompletion: true)
     }
 
-    func runCascade(maxAssets: Int) async {
+    func runCascade(maxAssets: Int, alreadyScanning: Bool = false, announceCompletion: Bool = false) async {
         refreshDevice()
-        isScanning = true
+        if !alreadyScanning {
+            isScanning = true
+        }
         defer { isScanning = false }
-        guard engine != nil else { return }
-        var processed = 0
+        guard engine != nil else {
+            lastError = lastError ?? "Couldn’t start the analysis engine."
+            scanProgress = ""
+            return
+        }
 
-        while processed < maxAssets {
+        scanProgress = "Analyzing…"
+        var processed = 0
+        var skipped = 0
+        var missingAsset = 0
+        var imageLoadFailed = 0
+        var gotBatch = false
+        var failedIds = Set<String>()
+
+        while processed + skipped < maxAssets {
             refreshDevice()
             let power = mapPower(DeviceRuntime.currentPower())
             let batch: FfiWorkBatch
@@ -218,24 +401,135 @@ final class AppModel: ObservableObject {
                       !b.assetIds.isEmpty
                 else { break }
                 batch = b
+                gotBatch = true
             } catch {
+                lastError = "Scan failed: \(error.localizedDescription)"
                 break
             }
 
-            for id in batch.assetIds {
-                await analyzeOne(id: id, tier: batch.tier)
-                processed += 1
-                scanProgress = "Analyzed \(processed) · \(String(describing: batch.tier))"
-                if processed >= maxAssets { break }
+            var batchAnalyzed: UInt64 = 0
+            var progressedThisBatch = false
+
+            // Clear stale/limited-library IDs before spending time on image loads.
+            let reachable = batch.assetIds.filter { photos.asset(for: $0) != nil }
+            let missing = batch.assetIds.filter { photos.asset(for: $0) == nil }
+            for id in missing where !failedIds.contains(id) {
+                await markAssetUnreachable(id: id)
+                failedIds.insert(id)
+                missingAsset += 1
+                skipped += 1
+                progressedThisBatch = true
+            }
+            if reachable.isEmpty {
+                if batch.assetIds.allSatisfy({ failedIds.contains($0) }) { break }
+                continue
+            }
+
+            for id in reachable {
+                if failedIds.contains(id) {
+                    skipped += 1
+                    continue
+                }
+                let result = await analyzeOne(id: id, tier: batch.tier)
+                progressedThisBatch = true
+                switch result {
+                case .analyzed:
+                    processed += 1
+                    batchAnalyzed += 1
+                case .missingAsset:
+                    missingAsset += 1
+                    skipped += 1
+                    failedIds.insert(id)
+                case .imageUnavailable:
+                    imageLoadFailed += 1
+                    skipped += 1
+                    failedIds.insert(id)
+                case .engineUnavailable:
+                    skipped += 1
+                    failedIds.insert(id)
+                }
+                let tierLabel = String(describing: batch.tier)
+                if skipped > 0 {
+                    scanProgress = "Analyzed \(processed) · skipped \(skipped) · \(tierLabel)"
+                } else {
+                    scanProgress = "Analyzed \(processed) · \(tierLabel)"
+                }
+                if processed + skipped >= maxAssets { break }
+            }
+            // Avoid spinning forever on the same unloadable ids.
+            if !progressedThisBatch, batch.assetIds.allSatisfy({ failedIds.contains($0) }) {
+                break
             }
             try? engine?.recordBatchProgress(
                 tier: batch.tier,
-                count: UInt64(batch.assetIds.count),
+                count: batchAnalyzed,
                 cursor: batch.assetIds.last
             )
         }
         _ = try? engine?.reclusterRecent(limit: 2000)
         rebuildQueue()
+
+        if !gotBatch {
+            // Already indexed / analyzed — still acknowledge a user tap so it doesn't feel dead.
+            scanProgress = ""
+            if announceCompletion {
+                scanFinishedMessage = Self.scanFinishedCopy(
+                    processed: 0,
+                    reviewRemaining: reviewRemaining,
+                    assetCount: assetCount,
+                    alreadyCaughtUp: true
+                )
+            }
+        } else if processed == 0 && skipped > 0 {
+            if missingAsset > 0 && imageLoadFailed == 0 {
+                if photos.authorizationStatus == .limited {
+                    // Show the “Choose more photos” card on Home.
+                    showOnboarding = true
+                    lastError = "Those photos aren’t in your allowed set. Tap Choose more photos, then Start scan again."
+                } else {
+                    await refreshPhotoLibrary()
+                    lastError = "Your library changed (deleted or new photos). Index refreshed — tap Start scan again."
+                }
+            } else if imageLoadFailed > 0 {
+                lastError = "Couldn’t decode \(imageLoadFailed) photo\(imageLoadFailed == 1 ? "" : "s") for analysis. If photos are in iCloud only, open Photos once to download them, then try again."
+            } else {
+                lastError = "Couldn’t load photo data for analysis. Check Photos access and try again."
+            }
+        } else if announceCompletion {
+            scanProgress = ""
+            scanFinishedMessage = Self.scanFinishedCopy(
+                processed: processed,
+                reviewRemaining: reviewRemaining,
+                assetCount: assetCount,
+                alreadyCaughtUp: false
+            )
+        }
+    }
+
+    private static func scanFinishedCopy(
+        processed: Int,
+        reviewRemaining: UInt32,
+        assetCount: UInt64,
+        alreadyCaughtUp: Bool
+    ) -> String {
+        if reviewRemaining > 0 {
+            let n = reviewRemaining
+            return "Scan finished — \(n) suggestion\(n == 1 ? "" : "s") ready for review."
+        }
+        if alreadyCaughtUp {
+            return assetCount > 0
+                ? "Scan finished. Nothing new to analyze — you’re caught up. Plug in for a deeper scan if you want more coverage."
+                : "Scan finished. No photos to analyze."
+        }
+        if processed > 0 {
+            return "Scan finished. No cleanup suggestions for your selected categories."
+        }
+        return "Scan finished."
+    }
+
+    /// Switch to the Review tab (Home CTA / post-scan alert).
+    func openReview() {
+        selectedTab = 1
     }
 
     func runForegroundChargingScan() async {
@@ -254,11 +548,26 @@ final class AppModel: ObservableObject {
         task.setTaskCompleted(success: true)
     }
 
-    private func analyzeOne(id: String, tier: FfiWorkTier) async {
-        guard let engine,
-              let asset = photos.asset(for: id),
-              let rgba = await photos.requestRGBAThumbnail(for: asset, maxPixel: 256)
-        else { return }
+    private enum AnalyzeOutcome {
+        case analyzed
+        case missingAsset
+        case imageUnavailable
+        case engineUnavailable
+    }
+
+    /// Attempts analysis; marks stale/unavailable assets so they leave the work queue.
+    private func analyzeOne(id: String, tier: FfiWorkTier) async -> AnalyzeOutcome {
+        guard let engine else { return .engineUnavailable }
+
+        guard let asset = photos.asset(for: id) else {
+            // Limited-library / deleted IDs stay in SQLite otherwise and block every scan.
+            await markAssetUnreachable(id: id)
+            return .missingAsset
+        }
+
+        guard let rgba = await photos.requestRGBAThumbnail(for: asset, maxPixel: 256) else {
+            return .imageUnavailable
+        }
 
         let snap = PhotoLibraryService.snapshot(from: asset)
         let meta = ffiMeta(from: snap)
@@ -278,7 +587,7 @@ final class AppModel: ObservableObject {
 
         if tier == .visionMl || tier == .vlm {
             if let image = await photos.requestThumbnail(for: asset, maxPixel: 512),
-               let cg = image.cgImage
+               let cg = PhotoLibraryService.cgImage(from: image)
             {
                 if let f = try? await VisionAnalyzers.analyzeFaces(cgImage: cg) {
                     face = FfiFaceFeatures(
@@ -348,6 +657,39 @@ final class AppModel: ObservableObject {
             vlm: vlm,
             tierCompleted: completed
         )
+        return .analyzed
+    }
+
+    /// Drop unreachable IDs out of the pending work queue (tier ≥ 2, hidden).
+    private func markAssetUnreachable(id: String) async {
+        guard let engine else { return }
+        let meta = FfiAssetMeta(
+            id: id,
+            createdAtUnix: 0,
+            isFavorite: false,
+            isHidden: true,
+            isScreenshot: false,
+            isBurst: false,
+            isLive: false,
+            burstId: nil,
+            latitude: nil,
+            longitude: nil,
+            pixelWidth: 0,
+            pixelHeight: 0,
+            byteSize: 0,
+            isLocallyAvailable: false,
+            secondaryBackupLabel: nil
+        )
+        _ = try? engine.saveFused(
+            meta: meta,
+            pixel: nil,
+            face: nil,
+            text: nil,
+            composition: nil,
+            embedding: nil,
+            vlm: nil,
+            tierCompleted: 2
+        )
     }
 
     func rebuildQueue() {
@@ -368,6 +710,8 @@ final class AppModel: ObservableObject {
         guard let item = engine?.peekReview() else {
             currentCard = nil
             cardImage = nil
+            cardImageLoadFailed = false
+            cardLoadGeneration += 1
             return
         }
         let displaySize = Self.reviewDisplaySize
@@ -381,17 +725,43 @@ final class AppModel: ObservableObject {
         )
         photos.startCaching(identifiers: [item.assetId], size: displaySize)
         let assetId = item.assetId
+        cardLoadGeneration += 1
+        let generation = cardLoadGeneration
         // Clear so the card shows a spinner instead of the previous photo while loading.
         cardImage = nil
+        cardImageLoadFailed = false
         Task {
-            guard let asset = photos.asset(for: assetId) else { return }
-            // Drive the UI only through onUpdate so a later await-return can't overwrite
-            // a sharper frame that already arrived.
-            _ = await photos.requestDisplayImage(for: asset, targetSize: displaySize) { preview in
+            guard generation == self.cardLoadGeneration else { return }
+            guard let asset = photos.asset(for: assetId) else {
+                if generation == self.cardLoadGeneration, self.currentCard?.assetId == assetId {
+                    self.cardImageLoadFailed = true
+                }
+                return
+            }
+            let applyPreview: (UIImage) -> Void = { preview in
                 Task { @MainActor in
-                    if self.currentCard?.assetId == assetId {
-                        self.cardImage = preview
-                    }
+                    guard generation == self.cardLoadGeneration, self.currentCard?.assetId == assetId else { return }
+                    self.cardImage = preview
+                    self.cardImageLoadFailed = false
+                }
+            }
+            let image = await photos.requestDisplayImage(
+                for: asset,
+                targetSize: displaySize,
+                onUpdate: applyPreview
+            )
+            guard generation == self.cardLoadGeneration, self.currentCard?.assetId == assetId else { return }
+            if let image {
+                self.cardImage = image
+                self.cardImageLoadFailed = false
+            } else if self.cardImage == nil {
+                // Last-chance small thumb before showing the failure state.
+                if let thumb = await photos.requestThumbnail(for: asset, maxPixel: 512) {
+                    guard generation == self.cardLoadGeneration, self.currentCard?.assetId == assetId else { return }
+                    self.cardImage = thumb
+                    self.cardImageLoadFailed = false
+                } else if self.cardImage == nil {
+                    self.cardImageLoadFailed = true
                 }
             }
         }
@@ -476,6 +846,8 @@ final class AppModel: ObservableObject {
         // Peek first so a failed/cancelled PhotoKit prompt keeps staging intact.
         let ids = engine?.stagedTossIds() ?? []
         guard !ids.isEmpty else { return }
+        isCommittingDeletes = true
+        defer { isCommittingDeletes = false }
         let bytes = photos.totalByteSize(identifiers: ids)
         do {
             try await photos.deleteAssets(identifiers: ids)

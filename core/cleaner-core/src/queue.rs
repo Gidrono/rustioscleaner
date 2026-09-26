@@ -48,6 +48,11 @@ impl ReviewQueue {
         self.pending.first()
     }
 
+    /// Most recent decision in the undo stack (if any).
+    pub fn last_history_decision(&self) -> Option<Decision> {
+        self.history.last().map(|(_, d)| *d)
+    }
+
     pub fn decide(&mut self, decision: Decision) -> Option<AssetId> {
         if matches!(decision, Decision::Undo) {
             return self.undo();

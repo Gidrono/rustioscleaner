@@ -52,6 +52,7 @@ targets:
         HEADER_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/Generated"
         SWIFT_OBJC_BRIDGING_HEADER: ""
         ENABLE_PREVIEWS: YES
+        ENABLE_TESTABILITY: YES
     preBuildScripts:
       - name: Ensure Rust XCFramework
         script: |

@@ -10,103 +10,155 @@ struct SwipeReviewView: View {
     /// Avoid resetting session stats when PhotoKit’s system confirm re-triggers onAppear.
     @State private var didStartSession = false
 
+    /// Space for Toss/Skip/Keep row + vertical padding (chips scroll in between).
+    private static let actionRowReserve: CGFloat = 88
+    private static let contentPadding: CGFloat = 16
+    private static let minCardHeight: CGFloat = 220
+    private static let maxCardHeight: CGFloat = 420
+
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 16) {
+        GeometryReader { geo in
+            let cardHeight = Self.cardHeight(for: geo.size.height)
+
+            Group {
                 if let card = model.currentCard {
-                    cardView(card)
-                        .offset(offset)
-                        .rotationEffect(.degrees(Double(offset.width / 20)))
-                        .gesture(drag)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityLabel(accessibilityLabel(for: card))
-                        .accessibilityHint("Swipe right to keep, left to toss, up to skip")
+                    VStack(spacing: 12) {
+                        cardView(card, height: cardHeight)
+                            .offset(offset)
+                            .rotationEffect(.degrees(Double(offset.width / 20)))
+                            .gesture(drag)
+                            .accessibilityElement(children: .contain)
+                            .accessibilityLabel(accessibilityLabel(for: card))
+                            .accessibilityHint("Swipe right to keep, left to toss, up to skip")
 
-                    reasonChips(card.reasons)
+                        ScrollView {
+                            reasonChips(card.reasons)
+                        }
+                        .scrollIndicators(.hidden)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    HStack(spacing: 24) {
-                        actionButton("Toss", system: "xmark.circle.fill", color: .red) {
-                            model.decide(.toss)
-                            resetOffset()
+                        HStack(spacing: 24) {
+                            actionButton("Toss", system: "xmark.circle.fill", color: .red) {
+                                model.decide(.toss)
+                                resetOffset()
+                            }
+                            .frame(maxWidth: .infinity)
+                            actionButton("Skip", system: "questionmark.circle", color: .orange) {
+                                model.decide(.skip)
+                                resetOffset()
+                            }
+                            .frame(maxWidth: .infinity)
+                            actionButton("Keep", system: "checkmark.circle.fill", color: .green) {
+                                model.decide(.keep)
+                                resetOffset()
+                            }
+                            .frame(maxWidth: .infinity)
                         }
-                        actionButton("Skip", system: "questionmark.circle", color: .orange) {
-                            model.decide(.skip)
-                            resetOffset()
-                        }
-                        actionButton("Keep", system: "checkmark.circle.fill", color: .green) {
-                            model.decide(.keep)
-                            resetOffset()
-                        }
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.isCommittingDeletes)
                     }
-                    .padding(.top, 8)
+                    // Propose a finite width first so FlowLayout / badges never expand past the screen.
+                    .frame(width: max(0, geo.size.width - Self.contentPadding * 2), alignment: .center)
+                    .padding(Self.contentPadding)
+                    .clipped()
                 } else if model.stagedTossCount > 0 {
                     ContentUnavailableView(
                         "Ready to delete",
                         systemImage: "trash.circle",
                         description: Text("\(model.stagedTossCount) photo\(model.stagedTossCount == 1 ? "" : "s") staged. Confirm below to move them to Recently Deleted.")
                     )
+                    .padding()
                 } else if model.sessionDeletedCount > 0 {
                     ContentUnavailableView(
                         "You're all caught up",
                         systemImage: "checkmark.seal",
                         description: Text(sessionEmptyDescription)
                     )
+                    .padding()
                 } else {
                     ContentUnavailableView(
                         "You're all caught up",
                         systemImage: "checkmark.seal",
                         description: Text("Run a scan to find more candidates, or enjoy the free space.")
                     )
-                }
-
-                if model.currentCard != nil || model.stagedTossCount > 0 {
-                    HStack {
-                        Button("Undo") { model.decide(.undo) }
-                            .disabled(model.currentCard == nil && model.stagedTossCount == 0)
-                        Spacer()
-                        Text("\(model.reviewRemaining) left")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Delete \(model.stagedTossCount)…") {
-                            showCommit = true
-                        }
-                        .disabled(model.stagedTossCount == 0)
-                    }
-                    .padding(.horizontal)
+                    .padding()
                 }
             }
-            .padding()
-            .navigationTitle("Keep or Toss")
-            .onAppear {
-                guard !didStartSession else { return }
-                didStartSession = true
-                model.resetSessionCleanStats()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            bottomChrome
+        }
+        .navigationTitle("Keep or Toss")
+        .onAppear {
+            guard !didStartSession else { return }
+            didStartSession = true
+            model.resetSessionCleanStats()
+        }
+        .confirmationDialog(
+            "Move \(model.stagedTossCount) photos to Recently Deleted?",
+            isPresented: $showCommit,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                Task { await model.commitDeletes() }
             }
-            .confirmationDialog(
-                "Move \(model.stagedTossCount) photos to Recently Deleted?",
-                isPresented: $showCommit,
-                titleVisibility: .visible
-            ) {
-                Button("Delete", role: .destructive) {
-                    Task { await model.commitDeletes() }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Apple will ask you to confirm. Photos stay recoverable for 30 days.")
-            }
-            .sheet(item: Binding(
-                get: { model.lastCleanResult },
-                set: { if $0 == nil { model.dismissCleanResult() } }
-            )) { result in
-                CleanedSummarySheet(result: result) {
-                    model.dismissCleanResult()
-                }
-            }
-            .sheet(item: $relatedPresentation) { presentation in
-                RelatedPhotoSheet(presentation: presentation)
-                    .environmentObject(model)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Apple will ask you to confirm. Photos stay recoverable for 30 days.")
+        }
+        .sheet(item: Binding(
+            get: { model.lastCleanResult },
+            set: { if $0 == nil { model.dismissCleanResult() } }
+        )) { result in
+            CleanedSummarySheet(result: result) {
+                model.dismissCleanResult()
             }
         }
+        .sheet(item: $relatedPresentation) { presentation in
+            RelatedPhotoSheet(presentation: presentation)
+                .environmentObject(model)
+        }
+    }
+
+    @ViewBuilder
+    private var bottomChrome: some View {
+        if model.isCommittingDeletes {
+            committingDoneBar
+                .padding(.horizontal, Self.contentPadding)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity)
+                .background(.bar)
+        } else if model.currentCard != nil || model.stagedTossCount > 0 {
+            ReviewBottomChrome(
+                remaining: Int(model.reviewRemaining),
+                stagedCount: model.stagedTossCount,
+                undoEnabled: model.currentCard != nil || model.stagedTossCount > 0,
+                deleteEnabled: model.stagedTossCount > 0,
+                onUndo: { model.decide(.undo) },
+                onDelete: { showCommit = true }
+            )
+            .padding(.horizontal, Self.contentPadding)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity)
+            .background(.bar)
+        }
+    }
+
+    private var committingDoneBar: some View {
+        HStack {
+            Spacer()
+            DoneRingButton(title: "Done", isActive: true)
+            Spacer()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Deleting photos")
+    }
+
+    private static func cardHeight(for availableHeight: CGFloat) -> CGFloat {
+        // Leave room for padding, a short chip strip, and the action row.
+        let proposed = availableHeight - (contentPadding * 2) - actionRowReserve - 48
+        return min(maxCardHeight, max(minCardHeight, proposed))
     }
 
     private var sessionEmptyDescription: String {
@@ -122,34 +174,41 @@ struct SwipeReviewView: View {
         return formatter.string(fromByteCount: bytes)
     }
 
-    private func cardView(_ card: AppModel.ReviewCard) -> some View {
+    private func cardView(_ card: AppModel.ReviewCard, height: CGFloat) -> some View {
         ZStack(alignment: .bottomLeading) {
             Group {
                 if let image = model.cardImage {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
+                } else if model.cardImageLoadFailed {
+                    Color.gray.opacity(0.2)
+                        .overlay {
+                            VStack(spacing: 8) {
+                                Image(systemName: "photo")
+                                    .font(.largeTitle)
+                                    .foregroundStyle(.secondary)
+                                Text("Couldn’t load photo")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                 } else {
                     Color.gray.opacity(0.2)
                         .overlay(ProgressView())
                 }
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 420)
-            .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: 20))
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(String(format: "junk %.0f%% · miss %.0f%% · aesthetic %.0f%%",
-                            card.junk * 100, card.miss * 100, card.aesthetic * 100))
-                    .font(.caption2.monospaced())
-            }
-            .padding(12)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-            .padding()
+            ReviewScoreBadge(junk: card.junk, miss: card.miss, aesthetic: card.aesthetic)
+                .padding(12)
 
             swipeOverlay
         }
+        .frame(maxWidth: .infinity)
+        .frame(height: height)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .accessibilityIdentifier("review.card")
     }
 
     @ViewBuilder
@@ -261,6 +320,47 @@ struct SwipeReviewView: View {
     }
 }
 
+// MARK: - Done ring (in-flight delete)
+
+/// Prominent Done label with a continuous angular ring while work is in progress.
+private struct DoneRingButton: View {
+    let title: String
+    let isActive: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isActive)) { context in
+            let degrees = context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 1.05) / 1.05 * 360
+
+            ZStack {
+                Circle()
+                    .stroke(Color.accentColor.opacity(0.18), lineWidth: 3)
+                    .frame(width: 88, height: 88)
+
+                Circle()
+                    .trim(from: 0.08, to: 0.72)
+                    .stroke(
+                        AngularGradient(
+                            colors: [
+                                Color.accentColor.opacity(0.15),
+                                Color.accentColor,
+                                Color.accentColor.opacity(0.15)
+                            ],
+                            center: .center
+                        ),
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                    )
+                    .frame(width: 88, height: 88)
+                    .rotationEffect(.degrees(degrees))
+
+                Text(title)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.primary)
+            }
+        }
+    }
+}
+
 /// Post-delete celebration with count, space freed, and Done.
 private struct CleanedSummarySheet: View {
     let result: AppModel.CleanResult
@@ -268,27 +368,34 @@ private struct CleanedSummarySheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                Spacer()
-                Image(systemName: "sparkles")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.tint)
-                Text("Nice clean")
-                    .font(Font.title.bold())
-                Text(batchLine)
-                    .font(.title3)
-                    .multilineTextAlignment(.center)
-                if showsSessionExtra {
-                    Text(sessionLine)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: 20) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.tint)
+                        Text("Nice clean")
+                            .font(Font.title.bold())
+                        Text(batchLine)
+                            .font(.title3)
+                            .multilineTextAlignment(.center)
+                        if showsSessionExtra {
+                            Text(sessionLine)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        Text("Photos stay in Recently Deleted for 30 days.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 32)
+                    .padding(.bottom, 16)
                 }
-                Text("Photos stay in Recently Deleted for 30 days.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                Spacer()
+
                 Button(action: onDone) {
                     Text("Done")
                         .font(.headline)
@@ -296,11 +403,13 @@ private struct CleanedSummarySheet: View {
                         .padding(.vertical, 14)
                 }
                 .buttonStyle(.borderedProminent)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
             }
-            .padding(24)
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     private var batchLine: String {
@@ -336,6 +445,7 @@ private struct RelatedPhotoSheet: View {
     @Environment(\.dismiss) private var dismiss
     let presentation: RelatedPhotoPresentation
     @State private var image: UIImage?
+    @State private var loadFailed = false
 
     var body: some View {
         NavigationStack {
@@ -346,6 +456,12 @@ private struct RelatedPhotoSheet: View {
                         .scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(Color.black.opacity(0.05))
+                } else if loadFailed {
+                    ContentUnavailableView(
+                        "Couldn’t load photo",
+                        systemImage: "photo",
+                        description: Text("This related photo may have been deleted or isn’t available on this device.")
+                    )
                 } else {
                     ProgressView("Loading…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -359,13 +475,88 @@ private struct RelatedPhotoSheet: View {
                 }
             }
             .task(id: presentation.assetId) {
-                _ = await model.loadRelatedImage(assetId: presentation.assetId) { preview in
+                loadFailed = false
+                image = nil
+                let result = await model.loadRelatedImage(assetId: presentation.assetId) { preview in
                     Task { @MainActor in
                         image = preview
+                        loadFailed = false
+                    }
+                }
+                if image == nil {
+                    if let result {
+                        image = result
+                    } else {
+                        loadFailed = true
                     }
                 }
             }
         }
+    }
+}
+
+// MARK: - Layout-constrained chrome (kept internal for overflow regression tests)
+
+/// Score overlay that must never widen the card past the proposed width.
+struct ReviewScoreBadge: View {
+    let junk: Float
+    let miss: Float
+    let aesthetic: Float
+
+    var body: some View {
+        Text(Self.label(junk: junk, miss: miss, aesthetic: aesthetic))
+            .font(.caption2.monospaced())
+            .lineLimit(1)
+            .minimumScaleFactor(0.55)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+            // Finite width proposal is required for minimumScaleFactor to engage.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("review.scoreBadge")
+    }
+
+    static func label(junk: Float, miss: Float, aesthetic: Float) -> String {
+        String(
+            format: "junk %.0f%% · miss %.0f%% · aesthetic %.0f%%",
+            junk * 100, miss * 100, aesthetic * 100
+        )
+    }
+}
+
+/// Undo / remaining / Delete row that compresses instead of overflowing the screen.
+struct ReviewBottomChrome: View {
+    let remaining: Int
+    let stagedCount: Int
+    let undoEnabled: Bool
+    let deleteEnabled: Bool
+    let onUndo: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button("Undo", action: onUndo)
+                .disabled(!undoEnabled)
+                .layoutPriority(1)
+
+            Text("\(remaining) left")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier("review.remaining")
+
+            Button(action: onDelete) {
+                Text("Delete \(stagedCount)…")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .disabled(!deleteEnabled)
+            .layoutPriority(1)
+            .accessibilityIdentifier("review.deleteButton")
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityIdentifier("review.bottomChrome")
     }
 }
 

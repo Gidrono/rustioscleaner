@@ -59,13 +59,33 @@ jobs:
       - name: Generate project
         working-directory: ios
         run: xcodegen generate
-      - name: Build for simulator
+      - name: Build and test for simulator
         working-directory: ios
         run: |
+          DEST=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          data=json.load(sys.stdin)
+          prefer=["iPhone 16","iPhone 17","iPhone SE"]
+          devices=[]
+          for runtime,devs in data.get("devices",{}).items():
+            if "iOS" not in runtime: continue
+            for d in devs:
+              if d.get("isAvailable") and d.get("name","").startswith("iPhone"):
+                devices.append(d["name"])
+          for name in prefer:
+            if name in devices:
+              print(f"platform=iOS Simulator,name={name}")
+              raise SystemExit
+          if devices:
+            print(f"platform=iOS Simulator,name={devices[0]}")
+          else:
+            raise SystemExit("No iPhone simulator available")
+          ')
+          echo "Using destination: $DEST"
           xcodebuild \
             -project ContextCleaner.xcodeproj \
             -scheme ContextCleaner \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination "$DEST" \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            test

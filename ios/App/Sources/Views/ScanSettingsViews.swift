@@ -56,7 +56,7 @@ struct ScanView: View {
                     .disabled(model.isScanning || !model.scanCategories.hasAnyEnabled)
 
                     if model.isScanning {
-                        ProgressView(model.scanProgress)
+                        ProgressView(model.scanProgress.isEmpty ? "Scanning…" : model.scanProgress)
                     }
                 }
                 Section {
@@ -78,6 +78,22 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    LabeledContent("Access", value: model.photosAccessIsLimited ? "Limited" : model.authStatusDescription)
+                    if model.photosAccessIsLimited {
+                        Button("Choose more photos…") {
+                            Task { await model.updateLimitedPhotoSelection() }
+                        }
+                    }
+                    Button("Refresh photo index") {
+                        Task { await model.refreshPhotoLibrary() }
+                    }
+                    .disabled(model.isScanning)
+                } header: {
+                    Text("Photos")
+                } footer: {
+                    Text("After deleting photos or taking new ones, refresh the index. With Limited Access, use Choose more photos to include new shots.")
+                }
                 Section("Privacy") {
                     LabeledContent("Analytics", value: "Off")
                     LabeledContent("Network", value: "VLM download only")
