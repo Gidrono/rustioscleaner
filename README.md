@@ -1,41 +1,76 @@
 # Context Cleaner
 
-Privacy-first, on-device photo culling for iOS 18+. Evaluates **human intent** behind a photo — not just pixel similarity — and helps you toss utility junk, social misses, and weaker shots in a burst.
+<p align="center">
+  <strong>Cull by intent, not pixels.</strong><br/>
+  Privacy-first photo cleanup for iOS 18+ — on-device models, explainable Keep/Toss, deletes go to Recently Deleted.
+</p>
 
-**MIT licensed · no accounts · no analytics · deletes go to Recently Deleted**
+<p align="center">
+  <img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" />
+  <img alt="iOS 18+" src="https://img.shields.io/badge/iOS-18%2B-black.svg" />
+  <img alt="On-device" src="https://img.shields.io/badge/photos-never%20leave%20device-success.svg" />
+  <img alt="No accounts" src="https://img.shields.io/badge/accounts-none-lightgrey.svg" />
+</p>
 
-## Why this exists
+<p align="center">
+  <img src="docs/screenshots/home.jpg" width="220" alt="Home — pick what to find, then scan" />
+  <img src="docs/screenshots/review.jpg" width="220" alt="Keep or Toss — reason chips on every card" />
+  <img src="docs/screenshots/cleaned.jpg" width="220" alt="Nice clean — space freed, Recently Deleted undo" />
+</p>
 
-Apple’s native duplicate finder is pixel-matching. Proprietary “cleaner” apps are predatory freemium. Context Cleaner runs a cascade of local models so heavy work only happens while charging, and every suggestion explains *why*.
+---
 
-| Capability | How |
-|---|---|
-| Utility junk | Vision text/barcode/document + SigLIP zero-shot + optional VLM |
-| Social misses | Face landmarks (blink, looking away; mouth-open experimental) |
-| Best-of-burst | Aesthetic + face quality + sharpness − miss penalty |
-| Keep / Toss UI | Swipe cards with reason chips and batched delete |
+## The problem
 
-## Architecture
+Your camera roll is full of **utility junk** (receipts, whiteboard shots, screenshots of screenshots), **social misses** (blinks, looking away), and **weaker frames** from every burst. Apple’s duplicate finder is pixel-matching. Most “cleaner” apps are freemium traps that want your photos in the cloud.
+
+**Context Cleaner** asks a different question: *what was the human trying to do with this photo?* Then it explains why something should go.
+
+## What it finds
+
+| Find | How it knows |
+|------|----------------|
+| **Duplicates & better shots** | Near-dup clusters; aesthetic + face quality + sharpness − miss penalty |
+| **Utility junk** | Vision text/barcode/document + SigLIP zero-shot + optional VLM |
+| **Social misses** | Face landmarks — blink, looking away (mouth-open experimental) |
+| **Blurry / exposure** | Laplacian sharpness + exposure histogram |
+
+You pick categories before a scan. Review is swipe cards with **reason chips** — not a black-box score.
+
+## Privacy, for real
+
+- Photos **never leave the device**
+- No accounts, no ads, no analytics
+- Deletes → **Recently Deleted** (30-day undo via Apple)
+- One optional network path: checksum-verified VLM weights you opt into in Settings
+
+Details: [PRIVACY.md](PRIVACY.md)
+
+## How it works
+
+Cheap signals on every photo; expensive models only on the uncertain subset — and heavy VLM work prefers **charging**.
 
 ```
-SwiftUI shell  →  PhotosKit / Vision / Core ML / MLX
-       ↕ UniFFI
-Rust core      →  signals, fusion, clustering, ranking, SQLite, scheduler
+SwiftUI  →  PhotosKit / Vision / Core ML / MLX
+    ↕ UniFFI
+Rust     →  signals · fusion · clustering · ranking · SQLite · thermal scheduler
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the analysis cascade and thermal policy.
+Cascade: metadata → Rust pixels → Vision + Core ML → optional MLX VLM → near-dup clusters → ranked review queue.
+
+Full story: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Requirements
 
-- macOS with Xcode 16+
+- macOS + Xcode 16+
 - Rust stable (`rustup`)
-- iOS 18+ device or simulator (A15+ recommended; VLM needs ≥6 GB RAM)
+- iOS 18+ device (A15+ recommended; VLM needs ≥6 GB RAM)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 
-## Build
+## Build & run
 
 ```bash
-# 1. Rust core + XCFramework + Swift bindings
+# 1. Rust core → XCFramework + Swift bindings
 ./scripts/build-xcframework.sh
 
 # 2. Generate & open the iOS project
@@ -43,7 +78,7 @@ cd ios && xcodegen generate
 open ContextCleaner.xcodeproj
 ```
 
-Select your Development Team in Xcode, then Run on a device (PhotoKit needs a real library for a meaningful demo).
+Set your Development Team in Xcode, then run on a **real device** — PhotoKit needs a real library to feel like the product.
 
 ### Rust-only (fast iteration)
 
@@ -53,13 +88,9 @@ cargo test --workspace
 cargo run -p cleaner-cli -- weights
 ```
 
-## Privacy
-
-Photos never leave the device. The **only** network path is an **opt-in**, checksum-verified VLM weight download. Details: [PRIVACY.md](PRIVACY.md).
-
 ## Models
 
-Bundled Core ML (SigLIP + aesthetic head) and optional VLM weights are documented in [models/MODELS.md](models/MODELS.md). Conversion scripts live under `models/scripts/`.
+Bundled Core ML (SigLIP + aesthetic head) plus optional on-device VLM. Licenses, sizes, and conversion scripts: [models/MODELS.md](models/MODELS.md).
 
 ## Contributing
 
