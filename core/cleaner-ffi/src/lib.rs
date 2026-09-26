@@ -541,8 +541,8 @@ impl CleanerEngine {
             FfiDecision::Skip => Decision::Skip,
             FfiDecision::Undo => Decision::Undo,
         };
-        let undone_was_keep =
-            matches!(d, Decision::Undo) && eng.queue.last_history_decision() == Some(Decision::Keep);
+        let undone_was_keep = matches!(d, Decision::Undo)
+            && eng.queue.last_history_decision() == Some(Decision::Keep);
         let id = eng.queue.decide(d);
         if let Some(ref asset_id) = id {
             if matches!(d, Decision::Undo) {
