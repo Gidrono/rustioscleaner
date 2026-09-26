@@ -216,7 +216,7 @@ final class AppModel: ObservableObject {
         case .denied, .restricted:
             showOnboarding = true
             openSystemPhotoSettings()
-            lastError = "Photo access is off. Enable Context Cleaner in Settings → Privacy → Photos, then return here."
+            lastError = "Photo access is off. Enable RustCleaner in Settings → Privacy → Photos, then return here."
         default:
             showOnboarding = true
             lastError = "Photo access is required to scan your library."

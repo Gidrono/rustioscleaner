@@ -6,7 +6,7 @@ target/
 **/mutants.out*/
 
 # Xcode / iOS
-ios/ContextCleaner.xcodeproj/
+ios/RustCleaner.xcodeproj/
 ios/**/xcuserdata/
 ios/**/DerivedData/
 ios/**/*.xcuserstate

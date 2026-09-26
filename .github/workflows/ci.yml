@@ -83,8 +83,8 @@ jobs:
           ')
           echo "Using destination: $DEST"
           xcodebuild \
-            -project ContextCleaner.xcodeproj \
-            -scheme ContextCleaner \
+            -project RustCleaner.xcodeproj \
+            -scheme RustCleaner \
             -destination "$DEST" \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \

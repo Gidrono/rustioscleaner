@@ -1,7 +1,7 @@
 import XCTest
-@testable import ContextCleaner
+@testable import RustCleaner
 
-final class ContextCleanerSmokeTests: XCTestCase {
+final class RustCleanerSmokeTests: XCTestCase {
     func testDefaultWeightsTomlNonEmpty() {
         let toml = defaultWeightsToml()
         XCTAssertTrue(toml.contains("version"))

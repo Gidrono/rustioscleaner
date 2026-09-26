@@ -1,4 +1,4 @@
-# Context Cleaner
+# RustCleaner
 
 <p align="center">
   <strong>Cull by intent, not pixels.</strong><br/>
@@ -24,7 +24,7 @@
 
 Your camera roll is full of **utility junk** (receipts, whiteboard shots, screenshots of screenshots), **social misses** (blinks, looking away), and **weaker frames** from every burst. Apple’s duplicate finder is pixel-matching. Most “cleaner” apps are freemium traps that want your photos in the cloud.
 
-**Context Cleaner** asks a different question: *what was the human trying to do with this photo?* Then it explains why something should go.
+**RustCleaner** asks a different question: *what was the human trying to do with this photo?* Then it explains why something should go.
 
 ## What it finds
 
@@ -75,7 +75,7 @@ Full story: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 # 2. Generate & open the iOS project
 cd ios && xcodegen generate
-open ContextCleaner.xcodeproj
+open RustCleaner.xcodeproj
 ```
 
 Set your Development Team in Xcode, then run on a **real device** — PhotoKit needs a real library to feel like the product.

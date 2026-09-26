@@ -15,7 +15,7 @@ Thanks for helping build a trustworthy, open-source photo cleaner.
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 brew install xcodegen
 ./scripts/build-xcframework.sh
-cd ios && xcodegen generate && open ContextCleaner.xcodeproj
+cd ios && xcodegen generate && open RustCleaner.xcodeproj
 ```
 
 ## Rust workflow

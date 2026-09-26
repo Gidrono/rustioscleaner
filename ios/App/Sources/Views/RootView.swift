@@ -73,7 +73,7 @@ struct HomeView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Context Cleaner")
+            .navigationTitle("RustCleaner")
             .overlay {
                 if model.isScanning {
                     ProgressView(model.scanProgress.isEmpty ? "Scanning…" : model.scanProgress)
@@ -93,8 +93,8 @@ struct HomeView: View {
             .font(.headline)
             Text(
                 model.photosAccessIsLimited
-                    ? "You’re on Limited Access. Choose the photos Context Cleaner can see (including new ones), then scan again."
-                    : "Context Cleaner needs access to your photo library to find cleanup candidates. Nothing leaves your iPhone."
+                    ? "You’re on Limited Access. Choose the photos RustCleaner can see (including new ones), then scan again."
+                    : "RustCleaner needs access to your photo library to find cleanup candidates. Nothing leaves your iPhone."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)

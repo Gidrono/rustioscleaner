@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 import XCTest
-@testable import ContextCleaner
+@testable import RustCleaner
 
 /// Regression: score badge / Delete chrome / chips must not grow past a proposed width.
 ///

@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Context Cleaner</string>
+	<string>RustCleaner</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -41,12 +41,12 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Context Cleaner analyzes your photos entirely on-device to find utility junk, social misses, and better shots in a burst. Photos never leave your iPhone.</string>
+	<string>RustCleaner analyzes your photos entirely on-device to find utility junk, social misses, and better shots in a burst. Photos never leave your iPhone.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Context Cleaner needs permission to move tossed photos to Recently Deleted.</string>
+	<string>RustCleaner needs permission to move tossed photos to Recently Deleted.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>org.contextcleaner.scan</string>
+		<string>org.rustcleaner.scan</string>
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>

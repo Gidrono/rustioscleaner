@@ -4,7 +4,7 @@ import UIKit
 
 /// Registers and runs `BGProcessingTask` for Tier 2/3 scanning while charging.
 public enum BackgroundScanScheduler {
-    public static let taskIdentifier = "org.contextcleaner.scan"
+    public static let taskIdentifier = "org.rustcleaner.scan"
 
     public static func register(handler: @escaping (BGProcessingTask) -> Void) {
         BGTaskScheduler.shared.register(

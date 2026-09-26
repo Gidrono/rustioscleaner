@@ -2,7 +2,7 @@ import Analyzers
 import SwiftUI
 
 @main
-struct ContextCleanerApp: App {
+struct RustCleanerApp: App {
     @StateObject private var model = AppModel()
 
     init() {
